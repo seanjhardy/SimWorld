@@ -112,25 +112,26 @@ class FishTank(Environment, ABC):
             character.render(self.viewer)
 
         # Draw output view
-        if len(self.characters) != 0 and isinstance(self.characters[0].controller, AgentController):
+        if len(self.characters) != 0:
             new_shape = (round(FishTank.input.size_of("observation") / 3), 3)
-            last_input = self.characters[0].controller.inputs[-1]
+            last_input = self.characters[0].observation
             o = np.reshape(FishTank.input.get_input(last_input, "observation"), new_shape)
             self.draw_observation(0, self.y_size, 180, 20, o)
 
-            last_prediction = self.characters[0].controller.predictions[-1]
-            p = np.reshape(FishTank.input.get_input(last_prediction, "observation"), new_shape)
-            self.draw_observation(0, self.y_size + 20, 180, 20, p, colour=(255, 0, 0))
-            label = pyglet.text.Label(f"Loss: {self.characters[0].controller.loss:.4f}", font_size=13,
-                                      font_name="Russo One",
-                                      x=200, y=WINDOW_H, anchor_x='left', anchor_y='top',
-                                      color=(255, 255, 255, 255))
-            self.viewer.add_label(label)
+            if isinstance(self.characters[0].controller, AgentController):
+                last_prediction = self.characters[0].controller.predictions[-1]
+                p = np.reshape(FishTank.input.get_input(last_prediction, "observation"), new_shape)
+                self.draw_observation(0, self.y_size + 20, 180, 20, p, colour=(255, 0, 0))
+                label = pyglet.text.Label(f"Loss: {self.characters[0].controller.loss:.4f}", font_size=13,
+                                          font_name="Russo One",
+                                          x=200, y=WINDOW_H, anchor_x='left', anchor_y='top',
+                                          color=(255, 255, 255, 255))
+                self.viewer.add_label(label)
 
-            err = self.characters[0].controller.inputs[-1:] - self.characters[0].controller.predictions[-1:]
-            mean_abs_err = np.mean(np.abs(err), 0)
-            e = np.reshape(FishTank.input.get_input(mean_abs_err, "observation"), new_shape)
-            self.draw_observation(0, self.y_size + 40, 180, 20, e, colour=(0, 255, 0))
+                err = self.characters[0].controller.inputs[-1:] - self.characters[0].controller.predictions[-1:]
+                mean_abs_err = np.mean(np.abs(err), 0)
+                e = np.reshape(FishTank.input.get_input(mean_abs_err, "observation"), new_shape)
+                self.draw_observation(0, self.y_size + 40, 180, 20, e, colour=(0, 255, 0))
 
         label = pyglet.text.Label(f"Time: {FishTank.time}", font_size=13,
                                   font_name="Russo One",
