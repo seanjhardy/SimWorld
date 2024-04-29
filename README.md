@@ -12,7 +12,7 @@ and their velocity normalised by their maximum acceleration.
 This input is then computed by the controller and returns an action space of 3 floating point numbers.
 Actions correspond to \[forward_thrust (0 - 1), rotational acceleration (0 full counter-clockwise, 0.5 - still, 1 - full clockwise, (TBD)\]
 
-![](https://github.com/seanjhardy/SimWorld/environments/fishTank/video.mp4)
+![](https://github.com/seanjhardy/SimWorld/environments/fishTank/demo.gif)
 
 CONTROLLERS:
 The primary controller AgentController, is built using a transformer architecture which predicts the
