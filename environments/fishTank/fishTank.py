@@ -114,7 +114,7 @@ class FishTank(Environment, ABC):
         # Draw output view
         if len(self.characters) != 0:
             new_shape = (round(FishTank.input.size_of("observation") / 3), 3)
-            last_input = self.characters[0].observation
+            last_input = self.characters[0].controller.inputs[-1]
             o = np.reshape(FishTank.input.get_input(last_input, "observation"), new_shape)
             self.draw_observation(0, self.y_size, 180, 20, o)
 

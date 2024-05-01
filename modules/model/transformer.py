@@ -132,11 +132,11 @@ class Transformer(nn.Module):
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(
-            wte=nn.Linear(config.input_size, config.n_embd, bias=config.bias),
-            wpe=nn.Embedding(config.block_size, config.n_embd),
+            #wte=nn.Linear(config.input_size, config.n_embd, bias=config.bias),
+            #wpe=nn.Embedding(config.block_size, config.n_embd - config.input_size),
             drop=nn.Dropout(config.dropout),
             h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f=LayerNorm(config.n_embd, bias=config.bias),
+            #ln_f=LayerNorm(config.n_embd, bias=config.bias),
             lm_head=nn.Linear(config.n_embd, config.input_size, bias=False)
         ))
         # with weight tying when using torch.compile() some warnings get generated:
@@ -164,8 +164,8 @@ class Transformer(nn.Module):
         params are actually used as weights in the final layer, so we include them.
         """
         n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()
+        #if non_embedding:
+        #    n_params -= self.transformer.wpe.weight.numel()
         return n_params
 
     def _init_weights(self, module):
@@ -176,25 +176,18 @@ class Transformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, visualise=False):
+    def forward(self, idx, targets=None):
         device = idx.device
         b, t, n = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
-
-        # Initialize attention weights list
-        attention_weights = []
 
         # forward the GPT model itself
-        pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
-        x = self.transformer.wte(idx)
-        x = self.transformer.drop(x + pos_emb)
+        pos_emb = self.positional_embedding(self.config.block_size, self.config.n_embd - self.config.input_size)
+        pos_emb = pos_emb.unsqueeze(0).expand(b, -1, -1)
+        idx = torch.cat((idx, pos_emb), dim=-1)
+        x = self.transformer.drop(idx)
         for block in self.transformer.h:
             x = block(x)
-
-            if isinstance(block.attn, CausalSelfAttention):
-                # Get attention weights from the first layer
-                attention_weights.append(block.attn.weight.cpu().numpy())
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
@@ -205,11 +198,16 @@ class Transformer(nn.Module):
             logits = self.transformer.lm_head(x[:, [-1], :])  # note: using list [-1] to preserve the time dim
             loss = None
 
-        # Visualize attention heatmap for the first layer
-        if attention_weights:
-            visualize_attention(attention_weights)
-
         return logits, loss
+
+    def positional_embedding(self, length, d_model):
+        pe = torch.zeros(length, d_model).pin_memory().to("cuda", non_blocking=True)
+        position = torch.arange(0, length).unsqueeze(1)
+        div_term = torch.exp((torch.arange(0, d_model, 2, dtype=torch.float) *
+                              -(math.log(10000.0) / d_model)))
+        pe[:, 0::2] = torch.sin(position.float() * div_term)
+        pe[:, 1::2] = torch.cos(position.float() * div_term)
+        return pe
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
@@ -217,7 +215,7 @@ class Transformer(nn.Module):
         # but want to use a smaller block size for some smaller, simpler model
         assert block_size <= self.config.block_size
         self.config.block_size = block_size
-        self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:block_size])
+        #self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:block_size])
         for block in self.transformer.h:
             if hasattr(block.attn, 'bias'):
                 block.attn.bias = block.attn.bias[:, :, :block_size, :block_size]
@@ -243,7 +241,7 @@ class Transformer(nn.Module):
             self.transformer.load_state_dict(loaded_checkpoint['transformer_state_dict'])
             optimizer.load_state_dict(loaded_checkpoint['optimizer_state_dict'])
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, log=False):
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
@@ -258,14 +256,16 @@ class Transformer(nn.Module):
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        if log:
+            print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+            print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
         # Create AdamW optimizer and use the fused version if it is available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-        print(f"using fused AdamW: {use_fused}")
+        if log:
+            print(f"using fused AdamW: {use_fused}")
 
         return optimizer
 

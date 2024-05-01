@@ -37,22 +37,22 @@ class AgentController(Controller):
     predicting = False
     save = False
 
-    def __init__(self, input_size, output_size):
+    def __init__(self, input_size, output_size, config=None):
         super().__init__()
         self.output_size = output_size
         self.input_size = input_size
         self.batch_size = 1
-        self.block_size = 512
+        self.block_size = 1024
         self.inputs = None
         self.predictions = None
         self.loss = 0
         self.buffer = 1
 
         # model init
-        self.gptconf = GPTConfig(
+        self.gptconf = config if config is not None else GPTConfig(
             input_size=input_size,
             block_size=self.block_size,  # how far back does the model look? i.e. context size
-            n_layer=6, n_head=6, n_embd=300,  # size of the model
+            n_layer=4, n_head=4, n_embd=400,  # size of the model
             dropout=0.0,  # for determinism+
             bias=True,
         )
@@ -107,7 +107,7 @@ class AgentController(Controller):
         self.optimizer.step()
         lossf = loss.item()
         self.loss = lossf
-        if FishTank.time % 10000 == 0 and AgentController.save:
+        if FishTank.time % 10000 == 0 and FishTank.time != 0 and AgentController.save:
             self.model.save(self.optimizer)
             print(f"loss: {self.loss:.4f}")
 

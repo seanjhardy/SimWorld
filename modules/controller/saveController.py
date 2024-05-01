@@ -28,7 +28,7 @@ class SaveController(Controller):
 
     def save(self):
         dirname = os.path.dirname(os.path.realpath(__file__))
-        pathName = f"../../dataset/data-space-{round(self.index / SaveController.save_interval)}"
+        pathName = f"../../dataset/data-{round(self.index / SaveController.save_interval)}"
         filename = os.path.join(dirname, pathName)
 
         np.save(filename, self.data)
