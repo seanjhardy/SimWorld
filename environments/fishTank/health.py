@@ -9,7 +9,7 @@ class Health(Point):
 
     def __init__(self, x, y):
         super(Health, self).__init__(x, y)
-        self.size = random.randrange(4, 10) * 0.5
+        self.size = random.randrange(2, 5)
         self.x = x
         self.y = y
 

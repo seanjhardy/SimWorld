@@ -1,17 +1,15 @@
-import math
 import os
-import random
-import time
 
 import numpy as np
 import torch
 
-from environments.fishTank.character import Character
+from dotmap import DotMap
 from environments.fishTank.fishTank import FishTank
 from modules.controller.controller import Controller
 from contextlib import nullcontext
 
-from modules.model.transformer import GPTConfig, Transformer
+from modules.model.hrlblock import HRLBlock
+from modules.model.transformer import TransformerConfig, Transformer
 
 seed = 1337
 device = 'cuda'  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
@@ -34,7 +32,7 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 class AgentController(Controller):
     training = False
     train_speed = 1000
-    predicting = False
+    predicting = True
     save = False
 
     def __init__(self, input_size, output_size, config=None):
@@ -46,27 +44,29 @@ class AgentController(Controller):
         self.inputs = None
         self.predictions = None
         self.loss = 0
-        self.buffer = 1
+
+        self.n_embed = 400
 
         # model init
-        self.gptconf = config if config is not None else GPTConfig(
+        self.transformerConfig = config if config is not None else TransformerConfig(
             input_size=input_size,
-            block_size=self.block_size,  # how far back does the model look? i.e. context size
-            n_layer=4, n_head=4, n_embd=400,  # size of the model
+            block_size=self.block_size,  # context size
+            n_layer=4, n_head=4, n_embd=self.n_embed,  # model params
             dropout=0.0,  # for determinism+
             bias=True,
+            weight_decay=0.0001, # Optimizer settings
+            learning_rate=0.001,
+            betas=(0.9, 0.95),
+            device_type=device_type
         )
-        self.model = Transformer(self.gptconf)
-        self.model.to(device)
+        self.models = DotMap(
+            world_model=Transformer(self.transformerConfig),
+            rl_block_1=HRLBlock(self.n_embed, self.output_size),
+        )
 
-        self.optimizer = self.model.configure_optimizers(weight_decay=0.0001, learning_rate=0.001, betas=(0.9, 0.95),
-                                                         device_type=device_type)
-        # self.model = torch.compile(self.model)  # pytorch 2.0
-        self.dir = random.random() * math.pi * 2
-        self.cur_dir = 0
-        self.speedInput = 0.2
         torch.cuda.synchronize()
-        self.model.load(self.optimizer)
+
+        self.load_model()
         self.reset()
 
     def run(self, input):
@@ -78,45 +78,81 @@ class AgentController(Controller):
         self.inputs[-1] = input
 
         if AgentController.predicting:
-            new_input = np.copy(self.predictions[self.buffer:self.buffer + self.block_size])
+            new_input = np.copy(self.predictions[1:self.block_size + 1])
             predicted_obs = FishTank.input.get_input(self.predictions[-1], "observation")
             new_input[-1] = FishTank.input.set_input(np.copy(input), "observation", predicted_obs)
-            #new_input = self.inputs[1:]
+            new_input = self.inputs[1:]
             new_input = torch.stack([torch.from_numpy(new_input.astype(np.float32))])
             new_input = new_input.pin_memory().to(device, non_blocking=True)
             with ctx:
-                logits, loss = self.model(new_input, None)
+                logits, loss = self.models.world_model(new_input, None)
             self.predictions = np.roll(self.predictions, shift=-1, axis=0)
             self.predictions[-1] = logits.cpu().detach().numpy()[0][-1]
-            return None#FishTank.input.get_input(self.predictions[-1], "actions")
+            self.loss = np.mean(np.abs(self.predictions[-2] - self.inputs[-1]))
+            return None  # FishTank.input.get_input(self.predictions[-1], "actions")
         else:
             self.predictions[-1] = input
 
         if AgentController.training and FishTank.time % AgentController.train_speed == 0:
-            X, Y = self.get_batch(self.inputs)
-            self.train(X, Y)
+            x, y = self.get_batch(self.inputs)
+            self.train(x, y)
 
         return None
 
-    def train(self, X, Y):
+    def train(self, x, y):
         with ctx:
-            logits, loss = self.model(X, Y)
+            logits, loss = self.models.world_model(x, y)
+        self.predictions = np.roll(self.predictions, shift=-1, axis=0)
         self.predictions[-1] = logits.cpu().detach().numpy()[0][-1]
-        self.optimizer.zero_grad(set_to_none=True)
+        self.models.world_model.optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        self.optimizer.step()
+        self.models.world_model.optimizer.step()
         lossf = loss.item()
         self.loss = lossf
         if FishTank.time % 10000 == 0 and FishTank.time != 0 and AgentController.save:
-            self.model.save(self.optimizer)
+            self.save_model()
             print(f"loss: {self.loss:.4f}")
 
     def reset(self):
-        self.inputs = np.zeros((self.batch_size * self.block_size + self.buffer, self.input_size), dtype=np.float32)
-        self.predictions = np.zeros((self.batch_size * self.block_size + self.buffer, self.input_size), dtype=np.float32)
+        self.inputs = np.zeros((self.block_size + 1, self.input_size), dtype=np.float32)
+        self.predictions = np.zeros((self.block_size + 1, self.input_size), dtype=np.float32)
 
     def get_batch(self, data):
         x = torch.stack([torch.from_numpy((data[:self.block_size]).astype(np.float32))])
-        y = torch.stack([torch.from_numpy((data[self.buffer:self.buffer + self.block_size]).astype(np.float32))])
+        y = torch.stack([torch.from_numpy((data[1:self.block_size + 1]).astype(np.float32))])
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
         return x, y
+
+    def model_name(self):
+        return f"wm-a2c-hrl-{self.input_size}-v1"
+
+    def save_model(self):
+        dirname = os.path.dirname(os.path.realpath(__file__))
+        path_name = f"../../checkpoints/{self.model_name()}.pth"
+        filename = os.path.join(dirname, path_name)
+
+        save_dict = {}
+        for name, model_obj in self.models.items():
+            save_dict[f"{name}"] = model_obj.model.state_dict()
+            save_dict[f"{name}_optimizer"] = model_obj.optimizer.state_dict()
+
+        torch.save(save_dict, filename)
+
+    def load_model(self):
+        dirname = os.path.dirname(os.path.realpath(__file__))
+        path_name = f"../../checkpoints/{self.model_name()}.pth"
+        filename = os.path.join(dirname, path_name)
+
+        if not os.path.isfile(filename):
+            return
+
+        print("Loading saved weights")
+
+        load_dict = torch.load(filename)
+        self.models.world_model.model.load_state_dict(load_dict[f"transformer_state_dict"])
+        self.models.world_model.model.optimizer.load_state_dict(load_dict[f"transformer_optimizer_state_dict"])
+        print("loaded!")
+        """for name, model_obj in self.models.items():
+            if name in load_dict:
+                model_obj.model.load_state_dict(load_dict[f"{name}"])
+                model_obj.optimizer.load_state_dict(load_dict[f"{name}_optimizer"])"""

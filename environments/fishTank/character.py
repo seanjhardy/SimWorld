@@ -33,6 +33,7 @@ class Character:
         self.controller = None
         self.actions = [0, 0.5, 0]
         self.body = [Point(x, y, 3), Point(x, y, 4), Point(x, y, 2), Point(x, y, 1)]
+        self.reward = 0
 
     def add_controller(self, controller):
         self.controller = controller
@@ -51,7 +52,7 @@ class Character:
         self.controller.reset()
 
     def step(self, env):
-        # calculate action values
+        # Calculate movement from previous actions
         self.accel = self.actions[0] * self.maxAccel
 
         self.dirChange = (self.actions[1] * 2 - 1) * self.maxAng
@@ -62,32 +63,40 @@ class Character:
         forceY = self.accel * math.sin(self.dir)
         self.body[0].apply_force(forceX, forceY)
 
+        # Apply physics constraints to body
         for i in range(len(self.body)):
             if i + 1 < len(self.body):
                 constrain_distance(self.body[i], self.body[i + 1], 10)
             constrain_position(self.body[i], 0, 0, env.x_size, env.y_size)
             self.body[i].update()
 
-        if self.observation is not None:
-            input = self.observation.flatten()
-            input = np.append(input, self.actions)
-            input = np.append(input, [self.body[0].x / FishTank.x_size, self.body[0].y / FishTank.y_size])
-            input = np.append(input, angle_to_vector(self.dir))
-            input = np.append(input, get_velocity(self.body[0]) / self.maxAccel)
-            self.actions = self.controller.run(input)
-            #self.actions = [0, 0.5, 0]
-            if self.actions is None:
-                dirChange = angle_diff(self.dir, self.target_dir)
-                dirChange = min(max(-Character.maxAng, dirChange * 0.05), Character.maxAng)
-                dirChangeInput = (dirChange/Character.maxAng + 1) / 2
-                self.actions = [self.target_speed, dirChangeInput, 0]
-                speed, dir = self.body[0].get_velocity()
-                if random.random() < 0.2 - clamp(0, speed/5, 1) * 0.2:
-                    self.target_dir = random.random() * math.pi * 2
-                if random.random() < 0.05:
-                    self.target_speed = random.random()
-                if self.colliding:
-                    self.target_dir = self.dir + math.pi
+        # Concatenate all the inputs
+        input = np.concatenate([
+            self.observation.flatten(),
+            self.actions,
+            [self.body[0].x / FishTank.x_size, self.body[0].y / FishTank.y_size],
+            angle_to_vector(self.dir),
+            [get_velocity(self.body[0]) / self.maxAccel]
+        ])
+
+        # Make prediction and get next actions
+        self.actions = self.controller.run(input)
+
+        # Reset reward
+        self.reward = 0
+
+        if self.actions is None:
+            dirChange = angle_diff(self.dir, self.target_dir)
+            dirChange = min(max(-Character.maxAng, dirChange * 0.05), Character.maxAng)
+            dirChangeInput = (dirChange / Character.maxAng + 1) / 2
+            self.actions = [self.target_speed, dirChangeInput, 0]
+            speed, dir = self.body[0].get_velocity()
+            if random.random() < 0.2 - clamp(0, speed / 5, 1) * 0.2:
+                self.target_dir = random.random() * math.pi * 2
+            if random.random() < 0.05:
+                self.target_speed = random.random()
+            if self.colliding:
+                self.target_dir = self.dir + math.pi
 
         self.colliding = False
         return
@@ -125,18 +134,20 @@ class Character:
         eyeR.add_attr(t)
 
         # iris
-        t = rendering.Transform(translation=(self.body[0].x + frontX + eyeX + irisX, self.body[0].y + frontY + eyeY + irisY))
+        t = rendering.Transform(
+            translation=(self.body[0].x + frontX + eyeX + irisX, self.body[0].y + frontY + eyeY + irisY))
         iris1 = viewer.draw_circle(radius=self.size * 0.3, filled=True, color=(0.0, 0.0, 0.0))
         iris1.add_attr(t)
 
-        t = rendering.Transform(translation=(self.body[0].x + frontX - eyeX + irisX, self.body[0].y + frontY - eyeY + irisY))
+        t = rendering.Transform(
+            translation=(self.body[0].x + frontX - eyeX + irisX, self.body[0].y + frontY - eyeY + irisY))
         iris2 = viewer.draw_circle(radius=self.size * 0.3, filled=True, color=(0.0, 0.0, 0.0))
         iris2.add_attr(t)
 
         # draw cell
-        #t = rendering.Transform(translation=(self.x, self.y))
-        #geom = viewer.draw_circle(radius=self.size, filled=True, color=self.get_colour())
-        #geom.add_attr(t)
+        # t = rendering.Transform(translation=(self.x, self.y))
+        # geom = viewer.draw_circle(radius=self.size, filled=True, color=self.get_colour())
+        # geom.add_attr(t)
 
         # draw tail
         for i in range(len(self.body)):
@@ -179,3 +190,6 @@ class Character:
     def get_colour(self):
         life = max(min(1.0, self.hp / 100), 0.4)
         return (200 * life + 55, 0, 0)
+
+    def add_reward(self, reward):
+        self.reward += reward

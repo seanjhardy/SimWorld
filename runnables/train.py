@@ -15,12 +15,12 @@ def train():
     batch_size = 16  # if gradient_accumulation_steps > 1, this is the micro-batch size
     grad_clip = 0.0
 
-    learning_rate = 0.001
+    learning_rate = 0.0001
     decay_lr = True  # whether to decay the learning rate
     warmup_iters = 20  # how many steps to warm up for
     lr_decay_iters = 1000  # should be ~= max_iters per Chinchilla
     iter_num = 0
-    min_lr = 0.00001
+    min_lr = 0.000001
     controller = AgentController(FishTank.input.get_size(), FishTank.output_size)
     block_size = controller.block_size
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler

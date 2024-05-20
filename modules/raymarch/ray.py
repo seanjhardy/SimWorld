@@ -21,7 +21,7 @@ def ray_march_kernel(fov, fidelity, x, y, dir, objects, health, output):
     minWallDist = 200
     minHealthDist = 200
     # check if ray intersects wall
-    dist = fastIntersectionLineAABB(x, y, endX, endY, 0, 0, 400, 400)
+    dist = fastIntersectionLineAABB(x, y, endX, endY, 0, 0, 400, 300)
     hitWall = False
     hitHealth = False
     if dist != -1:
@@ -49,7 +49,6 @@ def ray_march_kernel(fov, fidelity, x, y, dir, objects, health, output):
     if hitHealth and minHealthDist < minWallDist:
         output[idx][0] = 2
         output[idx][1] = minHealthDist
-
 
 # Host code
 def ray_march(character, objects, health):

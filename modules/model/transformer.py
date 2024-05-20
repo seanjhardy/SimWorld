@@ -114,7 +114,7 @@ class Block(nn.Module):
 
 
 @dataclass
-class GPTConfig:
+class TransformerConfig:
     input_size: int = 900
     block_size: int = 1024
     n_layer: int = 12
@@ -122,6 +122,19 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = False  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    weight_decay: float = 0.0001,
+    learning_rate: float = 0.001,
+    betas: (float, float) = (0.9, 0.95),
+    device_type: str = "cuda"
+
+
+def _init_weights(module):
+    if isinstance(module, nn.Linear):
+        torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        if module.bias is not None:
+            torch.nn.init.zeros_(module.bias)
+    elif isinstance(module, nn.Embedding):
+        torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
 
 class Transformer(nn.Module):
@@ -131,22 +144,17 @@ class Transformer(nn.Module):
         assert config.block_size is not None
         self.config = config
 
-        self.transformer = nn.ModuleDict(dict(
-            #wte=nn.Linear(config.input_size, config.n_embd, bias=config.bias),
-            #wpe=nn.Embedding(config.block_size, config.n_embd - config.input_size),
+        self.model = nn.ModuleDict(dict(
             drop=nn.Dropout(config.dropout),
             h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            #ln_f=LayerNorm(config.n_embd, bias=config.bias),
             lm_head=nn.Linear(config.n_embd, config.input_size, bias=False)
         ))
-        # with weight tying when using torch.compile() some warnings get generated:
-        # "UserWarning: functional_call was passed multiple values for tied weights.
-        # This behavior is deprecated and will be an error in future versions"
-        # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        #self.transformer.wte.weight = self.lm_head.weight  # https://paperswithcode.com/method/weight-tying
+        self.optimizer = None
+
+        self.configure_optimizers(config)
 
         # init all weights
-        self.apply(self._init_weights)
+        self.apply(_init_weights)
 
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
@@ -156,46 +164,28 @@ class Transformer(nn.Module):
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
 
-    def get_num_params(self, non_embedding=True):
-        """
-        Return the number of parameters in the model.
-        For non-embedding count (default), the position embeddings get subtracted.
-        The token embeddings would too, except due to the parameter sharing these
-        params are actually used as weights in the final layer, so we include them.
-        """
-        n_params = sum(p.numel() for p in self.parameters())
-        #if non_embedding:
-        #    n_params -= self.transformer.wpe.weight.numel()
-        return n_params
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
     def forward(self, idx, targets=None):
-        device = idx.device
         b, t, n = idx.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, " \
+                                            f"block size is only {self.config.block_size}"
 
-        # forward the GPT model itself
+        # Compute positional embeddings and add it to sequence
         pos_emb = self.positional_embedding(self.config.block_size, self.config.n_embd - self.config.input_size)
         pos_emb = pos_emb.unsqueeze(0).expand(b, -1, -1)
         idx = torch.cat((idx, pos_emb), dim=-1)
-        x = self.transformer.drop(idx)
-        for block in self.transformer.h:
+
+        # Apply dropout layer
+        x = self.model.drop(idx)
+        for block in self.model.h:
             x = block(x)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.transformer.lm_head(x)
+            logits = self.model.lm_head(x)
             loss = F.l1_loss(logits, targets)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.transformer.lm_head(x[:, [-1], :])  # note: using list [-1] to preserve the time dim
+            logits = self.model.lm_head(x[:, [-1], :])  # note: using list [-1] to preserve the time dim
             loss = None
 
         return logits, loss
@@ -215,34 +205,13 @@ class Transformer(nn.Module):
         # but want to use a smaller block size for some smaller, simpler model
         assert block_size <= self.config.block_size
         self.config.block_size = block_size
-        #self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[:block_size])
-        for block in self.transformer.h:
+        # self.model.wpe.weight = nn.Parameter(self.model.wpe.weight[:block_size])
+        for block in self.model.h:
             if hasattr(block.attn, 'bias'):
                 block.attn.bias = block.attn.bias[:, :, :block_size, :block_size]
 
-    def save(self, optimizer):
-        dirname = os.path.dirname(os.path.realpath(__file__))
-        pathName = f"../../checkpoints/checkpoint-{self.config.block_size}x{self.config.input_size}x{self.config.n_embd}x{self.config.n_layer}.pth"
-        filename = os.path.join(dirname, pathName)
-
-        torch.save({
-            'transformer_state_dict': self.transformer.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict()
-        }, filename)
-
-    def load(self, optimizer):
-        dirname = os.path.dirname(os.path.realpath(__file__))
-        pathName = f"../../checkpoints/checkpoint-{self.config.block_size}x{self.config.input_size}x{self.config.n_embd}x{self.config.n_layer}.pth"
-        filename = os.path.join(dirname, pathName)
-
-        if os.path.isfile(filename):
-            print("Loading saved weights")
-            loaded_checkpoint = torch.load(filename)
-            self.transformer.load_state_dict(loaded_checkpoint['transformer_state_dict'])
-            optimizer.load_state_dict(loaded_checkpoint['optimizer_state_dict'])
-
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, log=False):
-        # start with all of the candidate parameters
+    def configure_optimizers(self, config, log=False):
+        # start with all the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
@@ -251,7 +220,7 @@ class Transformer(nn.Module):
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
         optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': decay_params, 'weight_decay': config.weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
@@ -261,13 +230,14 @@ class Transformer(nn.Module):
             print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
         # Create AdamW optimizer and use the fused version if it is available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-        use_fused = fused_available and device_type == 'cuda'
+        use_fused = fused_available and config.device_type == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
-        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+        print(optim_groups, config.learning_rate, config.betas)
+        optimizer = torch.optim.AdamW(optim_groups, lr=config.learning_rate, betas=config.betas, **extra_args)
         if log:
             print(f"using fused AdamW: {use_fused}")
 
-        return optimizer
+        self.optimizer = optimizer
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
@@ -284,6 +254,10 @@ class Transformer(nn.Module):
         flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
         mfu = flops_achieved / flops_promised
         return mfu
+
+    def get_num_params(self):
+        n_params = sum(p.numel() for p in self.parameters())
+        return n_params
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
