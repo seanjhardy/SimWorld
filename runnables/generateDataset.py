@@ -11,7 +11,7 @@ def generateDataset():
     simulation = Simulation(env)
 
     ai = Character(300, 300)
-    controller = SaveController(env.input.get_size())
+    controller = SaveController(env.inputType.get_size())
     ai.add_controller(controller)
     simulation.env.add_character(ai)
 

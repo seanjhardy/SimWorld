@@ -1,54 +1,53 @@
 import sys
 from threading import Thread
 
-from modules.controller.agentController import AgentController
-
-
 class Simulation:
-    def __init__(self, env):
+    def __init__(self, env, agent):
         self.env = env
+        self.agent = agent
         self.rendering = True
         self.state = "playing"
         thread = Thread(target=self.process_user_input, daemon=True)
         thread.start()
 
     def run(self):
+        action = None
         while self.state != "done" and self.state != "paused":
-            self.env.simulate()
+            state, reward = self.env.step(action)
+            action = self.agent.step(state, reward, self.env.time)
             if self.rendering:
-                self.env.render()
+                self.env.render(self.agent)
 
     def process_user_input(self):
         self.print_help_message()
-        userInput = ""
-        while userInput != "exit":
+        user_input = ""
+        while user_input != "exit":
             try:
-                userInput = input(">:")
-                commandType = self.get_argument(userInput, 0)
+                user_input = input(">:")
+                command_type = self.get_argument(user_input, 0)
                 commands = {
                     "exit": self.exit_program,
                     "render": self.render,
                     "reset": self.reset,
-                    "train": self.toggle_train,
                     "play": self.play,
                     "pause": self.pause,
                     "predict": self.predict,
-                    "train_speed": self.train_speed,
+                    "train": self.train_speed,
                     "save": self.save,
                 }
-                command = commands.get(commandType, lambda x: self.invalid_command())
-                command(userInput)
+                command = commands.get(command_type, lambda x: self.invalid_command())
+                command(user_input)
             except:
                 self.invalid_command()
 
     def get_num_args(self, command):
         return len(command.split())
 
-    def get_argument(self, command, argNum):
+    def get_argument(self, command, arg_num):
         arguments = command.split()
-        if argNum >= len(arguments):
-            return "INVALID"
-        argument = arguments[argNum].replace(" ", "")
+        if arg_num >= len(arguments):
+            raise Exception(f"Expected an argument at position {arg_num} but found None")
+        argument = arguments[arg_num].replace(" ", "")
         return argument
 
     def print_help_message(self):
@@ -77,25 +76,27 @@ class Simulation:
         print("Pausing simulation")
         return
 
-    def toggle_train(self, command):
-        AgentController.training = not AgentController.training
-        print(f"Training {'enabled' if AgentController.training else 'disabled'}")
-        return
-
     def train_speed(self, command):
-        train_speed = self.get_argument(command, 1)
-        AgentController.train_speed = int(train_speed)
-        print(f"Set train speed to {train_speed}")
+        try:
+            train_interval = self.get_argument(command, 1)
+            self.agent.train_interval = int(train_interval)
+            print(f"Set train interval to {train_interval}")
+        except Exception as e:
+            print(e)
         return
 
     def predict(self, command):
-        AgentController.predicting = not AgentController.predicting
-        print(f"Prediction {'enabled' if AgentController.predicting else 'disabled'}")
+        self.agent.predicting = not self.agent.predicting
+        print(f"Prediction {'enabled' if self.agent.predicting else 'disabled'}")
         return
 
     def save(self, command):
-        AgentController.save = not AgentController.save
-        print(f"Saving {'enabled' if AgentController.save else 'disabled'}")
+        try:
+            save_interval = self.get_argument(command, 1)
+            self.agent.train_interval = int(save_interval)
+            print(f"Set save interval to {save_interval}")
+        except Exception as e:
+            print(e)
         return
 
     def reset(self, command):

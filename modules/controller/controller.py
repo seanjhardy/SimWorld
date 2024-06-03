@@ -2,5 +2,5 @@ class Controller:
     def __init__(self):
         self.data = []
 
-    def run(self, input):
+    def step(self, input, reward, time):
         return []

@@ -21,7 +21,7 @@ def train():
     lr_decay_iters = 1000  # should be ~= max_iters per Chinchilla
     iter_num = 0
     min_lr = 0.000001
-    controller = AgentController(FishTank.input.get_size(), FishTank.output_size)
+    controller = AgentController(FishTank.inputType.get_size(), FishTank.output_size)
     block_size = controller.block_size
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
@@ -60,7 +60,7 @@ def train():
             ix = torch.minimum(ix, torch.tensor(500000))
             print(ix)
         else:
-            name = f"../dataset/data-{random.randint(1, 7)}.npy"
+            name = f"../dataset/data-{random.randint(2, 7)}.npy"
             data = np.load(name, mmap_mode="r")
             # index fuckery so the range never lies on a multiple of 5,000 (when the environment changes)
             max_valid_start = dataset_length - block_size - (dataset_length % env_change_interval)
@@ -78,14 +78,14 @@ def train():
     while True:
         # determine and set the learning rate for this iteration
         lr = get_lr(iter_num) if decay_lr else learning_rate
-        for param_group in controller.optimizer.param_groups:
+        for param_group in controller.models.world_model.optimizer.param_groups:
             param_group['lr'] = lr
 
         # forward backward update, with optional gradient accumulation to simulate larger batch size
         # and using the GradScaler if data type is float16
         for micro_step in range(gradient_accumulation_steps):
             with ctx:
-                logits, loss = controller.model(X, Y)
+                logits, loss = controller.models.world_model(X, Y)
                 loss = loss / gradient_accumulation_steps  # scale the loss to account for gradient accumulation
             if iter_num % 20 == 0:
                 print("Y:\n", Y[0][-1], "\nLOGITS:\n", logits[0][-1])
@@ -96,13 +96,13 @@ def train():
             scaler.scale(loss).backward()
         # clip the gradient
         if grad_clip != 0.0:
-            scaler.unscale_(controller.optimizer)
-            torch.nn.utils.clip_grad_norm_(controller.model.parameters(), grad_clip)
+            scaler.unscale_(controller.models.world_model.optimizer)
+            torch.nn.utils.clip_grad_norm_(controller.models.world_model.parameters(), grad_clip)
         # step the optimizer and scaler if training in fp16
-        scaler.step(controller.optimizer)
+        scaler.step(controller.models.world_model.optimizer)
         scaler.update()
         # flush the gradients as soon as we can, no need for this memory anymore
-        controller.optimizer.zero_grad(set_to_none=True)
+        controller.models.world_model.optimizer.zero_grad(set_to_none=True)
         dt = time.time() - t0
         t0 = time.time()
         if iter_num % 1 == 0:
@@ -110,13 +110,13 @@ def train():
             # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
             lossf = loss.item() * gradient_accumulation_steps
             if iter_num >= 5:  # let the training loop settle a bit
-                mfu = controller.model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+                mfu = controller.models.world_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
                 running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
             print(f"iter {iter_num}: loss {lossf:.4f}, time {dt * 1000:.2f}ms, mfu {running_mfu * 100:.2f}%")
 
         iter_num += 1
         if iter_num % 100 == 0:
-            controller.model.save(controller.optimizer)
+            controller.save_model()
 
 
 if __name__ == "__main__":

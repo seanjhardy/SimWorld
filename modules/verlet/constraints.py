@@ -13,17 +13,23 @@ def constrain_distance(point1, point2, distance):
 
 
 def constrain_position(point, xmin, ymin, xmax, ymax):
-    updated = False
-    if point.x < xmin + point.mass:
-        point.x = xmin + point.mass
-        updated = True
-    if point.x > xmax - point.mass:
-        point.x = xmax - point.mass
-        updated = True
-    if point.y < ymin + point.mass:
-        point.y = ymin + point.mass
-        updated = True
-    if point.y > ymax - point.mass:
-        point.y = ymax - point.mass
-        updated = True
-    return updated
+    update_dist = 0
+    bounds = [xmin + point.mass,
+              xmax - point.mass,
+              ymin + point.mass,
+              ymax - point.mass]
+
+    if point.x < bounds[0]:
+        update_dist += abs(point.x - bounds[0])
+        point.x = bounds[0]
+    if point.x > bounds[1]:
+        update_dist += abs(point.x - bounds[1])
+        point.x = bounds[1]
+
+    if point.y < bounds[2]:
+        update_dist += abs(point.y - bounds[2])
+        point.y = bounds[2]
+    if point.y > bounds[3]:
+        update_dist += abs(point.y - bounds[3])
+        point.y = bounds[3]
+    return update_dist

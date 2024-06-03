@@ -5,7 +5,7 @@ from numba import cuda
 
 
 @cuda.jit(device=True, fastmath=True)
-def checkCollisionCircleRec(dir, x, y, size, minX, minY, maxX, maxY, out):
+def checkCollisionCircleRec(x, y, size, minX, minY, maxX, maxY, out):
     xOverlap = 0
     yOverlap = 0
     pX = x
@@ -48,9 +48,9 @@ def checkCollisionCircleRec(dir, x, y, size, minX, minY, maxX, maxY, out):
             depth -= size * 2
 
         if abs(normalX * depth) > abs(out[0]):
-            out[0] += normalX * depth * 1.1
+            out[0] = normalX * depth
         if abs(normalY * depth) > abs(out[1]):
-            out[1] += normalY * depth * 1.1
+            out[1] = normalY * depth
 
 
 @cuda.jit(device=True, fastmath=True)

@@ -1,22 +1,10 @@
-"""
-Full definition of a GPT Language Model, all of it in this single file.
-References:
-1) the official GPT-2 TensorFlow implementation released by OpenAI:
-https://github.com/openai/gpt-2/blob/master/src/model.py
-2) huggingface/transformers PyTorch implementation:
-https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
-"""
-
 import math
 import inspect
-import os
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-
-from runnables.visualiseModel import visualize_attention
 
 
 class LayerNorm(nn.Module):
@@ -29,6 +17,17 @@ class LayerNorm(nn.Module):
 
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+
+
+def generate_attention_mask(rows, cols):
+    attn_mask = torch.ones(rows, cols, dtype=torch.bool).tril(diagonal=0)
+    row_indices = torch.arange(rows).reshape(-1, 1)
+    col_indices = torch.arange(cols)
+    result = (row_indices * col_indices) / (rows * cols)
+    result = result < (1 - torch.rand((rows, cols)) * 0.1)
+    result = attn_mask
+    result = torch.where(result == 0, -torch.inf, 0)
+    return result.to("cuda", non_blocking=True)
 
 
 class CausalSelfAttention(nn.Module):
@@ -66,6 +65,8 @@ class CausalSelfAttention(nn.Module):
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
+
+            #attn_mask = generate_attention_mask(q.size(-2), k.size(-2))
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None,
                                                                  dropout_p=self.dropout if self.training else 0,
                                                                  is_causal=True)
@@ -116,6 +117,7 @@ class Block(nn.Module):
 @dataclass
 class TransformerConfig:
     input_size: int = 900
+    output_size: int = 900
     block_size: int = 1024
     n_layer: int = 12
     n_head: int = 12
@@ -147,19 +149,21 @@ class Transformer(nn.Module):
         self.model = nn.ModuleDict(dict(
             drop=nn.Dropout(config.dropout),
             h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            lm_head=nn.Linear(config.n_embd, config.input_size, bias=False)
+            lm_head=nn.Linear(config.n_embd, config.output_size, bias=False)
         ))
+        self.to(config.device_type)
         self.optimizer = None
-
-        self.configure_optimizers(config)
 
         # init all weights
         self.apply(_init_weights)
+
 
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
+
+        self.configure_optimizers(config)
 
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
@@ -170,7 +174,8 @@ class Transformer(nn.Module):
                                             f"block size is only {self.config.block_size}"
 
         # Compute positional embeddings and add it to sequence
-        pos_emb = self.positional_embedding(self.config.block_size, self.config.n_embd - self.config.input_size)
+        pos_emb = self.positional_embedding(self.config.block_size,
+                                            self.config.n_embd - self.config.input_size)
         pos_emb = pos_emb.unsqueeze(0).expand(b, -1, -1)
         idx = torch.cat((idx, pos_emb), dim=-1)
 
@@ -179,24 +184,39 @@ class Transformer(nn.Module):
         for block in self.model.h:
             x = block(x)
 
-        if targets is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.model.lm_head(x)
-            loss = F.l1_loss(logits, targets)
-        else:
+        latent = x[0]
+
+        if targets is None:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.model.lm_head(x[:, [-1], :])  # note: using list [-1] to preserve the time dim
             loss = None
+        else:
+            # if we are given some desired targets also calculate the loss
+            logits = self.model.lm_head(x)
+            loss = self.backwards(logits, targets)
 
-        return logits, loss
+        return logits.cpu().detach().numpy()[0], loss, latent
+
+    def backwards(self, logits, targets):
+        loss = F.l1_loss(logits, targets)
+
+        self.optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        self.optimizer.step()
+        return loss
 
     def positional_embedding(self, length, d_model):
+        # If the positional embedding size is not a multiple of 2 (for sin and cos) remove the excess
+        excess = d_model - math.floor(d_model/2) * 2
+        d_model = d_model - excess
+
         pe = torch.zeros(length, d_model).pin_memory().to("cuda", non_blocking=True)
         position = torch.arange(0, length).unsqueeze(1)
         div_term = torch.exp((torch.arange(0, d_model, 2, dtype=torch.float) *
                               -(math.log(10000.0) / d_model)))
         pe[:, 0::2] = torch.sin(position.float() * div_term)
         pe[:, 1::2] = torch.cos(position.float() * div_term)
+        pe = F.pad(pe, (0, excess))
         return pe
 
     def crop_block_size(self, block_size):
@@ -232,7 +252,6 @@ class Transformer(nn.Module):
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and config.device_type == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
-        print(optim_groups, config.learning_rate, config.betas)
         optimizer = torch.optim.AdamW(optim_groups, lr=config.learning_rate, betas=config.betas, **extra_args)
         if log:
             print(f"using fused AdamW: {use_fused}")

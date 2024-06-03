@@ -12,7 +12,6 @@ def angle_to_vector(angle):
         x /= magnitude
         y /= magnitude
 
-
     return [x, y]
 
 
@@ -41,6 +40,6 @@ def angle_diff(angle1, angle2):
     diff = angle2 - angle1
 
     # Normalize the difference to be within -π to π radians
-    diff = (diff + math.pi) % (2*math.pi) - math.pi
+    diff = (diff + math.pi) % (2 * math.pi) - math.pi
 
     return diff
