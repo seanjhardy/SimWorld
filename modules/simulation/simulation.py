@@ -1,6 +1,7 @@
 import sys
 from threading import Thread
 
+
 class Simulation:
     def __init__(self, env, agent):
         self.env = env
@@ -14,7 +15,7 @@ class Simulation:
         action = None
         while self.state != "done" and self.state != "paused":
             state, reward = self.env.step(action)
-            action = self.agent.step(state, reward, self.env.time)
+            action = self.agent.step(state, reward)
             if self.rendering:
                 self.env.render(self.agent)
 
@@ -78,8 +79,10 @@ class Simulation:
 
     def train_speed(self, command):
         try:
-            train_interval = self.get_argument(command, 1)
-            self.agent.train_interval = int(train_interval)
+            train_interval = int(self.get_argument(command, 1))
+            if train_interval == 0:
+                train_interval = -1
+            self.agent.train_interval = train_interval
             print(f"Set train interval to {train_interval}")
         except Exception as e:
             print(e)
@@ -92,8 +95,10 @@ class Simulation:
 
     def save(self, command):
         try:
-            save_interval = self.get_argument(command, 1)
-            self.agent.train_interval = int(save_interval)
+            save_interval = int(self.get_argument(command, 1))
+            if save_interval == 0:
+                save_interval = -1
+            self.agent.save_interval = save_interval
             print(f"Set save interval to {save_interval}")
         except Exception as e:
             print(e)

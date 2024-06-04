@@ -11,7 +11,7 @@ from environments.fishTank.fishTank import FishTank
 from modules.controller.agentController import AgentController, device_type
 from contextlib import nullcontext
 
-from modules.networks.transformer import GPTConfig
+from modules.networks.transformer import TransformerConfig
 
 
 def train(config, learning_rate):
@@ -25,7 +25,7 @@ def train(config, learning_rate):
     iter_num = 0
     min_lr = 0.000001
     controller = AgentController(FishTank.inputType.get_size(), FishTank.output_size, config=config)
-    block_size = config.block_size
+    block_size = config.context_size
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
     ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
@@ -118,9 +118,9 @@ def search():
         size *= len(values)
     i = 0
     for lr, block_size, n_layer, n_head, n_embed in searchGrid:
-        config = GPTConfig(
+        config = TransformerConfig(
             input_size=input_size,
-            block_size=block_size,  # how far back does the model look? i.e. context size
+            context_size=block_size,  # how far back does the model look? i.e. context size
             n_layer=n_layer, n_head=n_head, n_embd=n_embed,  # size of the model
             dropout=0.0,  # for determinism+
             bias=True,

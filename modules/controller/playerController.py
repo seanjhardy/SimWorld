@@ -21,7 +21,7 @@ class PlayerController(Controller):
         if k in self.keys_down:
             self.keys_down[k] = False
 
-    def step(self, input, reward, time):
+    def step(self, input, reward):
         actions = [0, 0.5, 0]
 
         actions[0] = int(self.keys_down[key.W]) * 0.5 - int(self.keys_down[key.S]) * 0.5

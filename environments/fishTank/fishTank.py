@@ -5,7 +5,7 @@ from abc import ABC
 import numpy as np
 import pyglet
 from gym.envs.classic_control import rendering
-from gym.spaces import flatten
+from gym.spaces import flatten, flatdim
 from gym.vector.utils import spaces
 
 from environments.environment import Environment
@@ -17,6 +17,8 @@ from modules.collisions.collisions import solve_collisions
 from modules.raymarch.ray import ray_march
 from modules.renderingTools import Texture
 from modules.utils.mathHelper import angle_to_vector, get_velocity
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 
 WINDOW_W = 500
 WINDOW_H = 500
@@ -48,11 +50,13 @@ class FishTank(Environment, ABC):
 
         self.action_space = spaces.Box(low=-1, high=1, shape=(2,))
         self.observation_space = spaces.OrderedDict({
-            "observation": spaces.Box(low=0, high=1, shape=(self.obs_pixels * 3,)),
-            "collision_force": spaces.Box(low=-np.inf, high=np.inf, shape=(1,)),
-            "position": spaces.Box(low=0, high=1, shape=(2,)),
-            "direction": spaces.Box(low=0, high=1, shape=(2,)),
-            "velocity": spaces.Box(low=0, high=1, shape=(1,)),
+            "vision": spaces.Box(low=0, high=1, shape=(self.obs_pixels * 3,)),
+            "dynamics": spaces.OrderedDict({
+                "collision_force": spaces.Box(low=-np.inf, high=np.inf, shape=(1,)),
+                "position": spaces.Box(low=0, high=1, shape=(2,)),
+                "direction": spaces.Box(low=0, high=1, shape=(2,)),
+                "velocity": spaces.Box(low=0, high=1, shape=(1,)),
+            })
         })
         self.time = 1
         self.maxHealth = 8
@@ -91,11 +95,13 @@ class FishTank(Environment, ABC):
         self.time += 1
 
         observation = {
-            "observation": self.get_observation(self.character),
-            "collision_force": [self.character.collision_force],
-            "position": [self.character.body[0].x / self.x_size, self.character.body[0].y / self.y_size],
-            "direction": angle_to_vector(self.character.dir),
-            "velocity": [velocity],
+            "vision": self.get_observation(self.character),
+            "dynamics": {
+                "collision_force": [self.character.collision_force],
+                "position": [self.character.body[0].x / self.x_size, self.character.body[0].y / self.y_size],
+                "direction": angle_to_vector(self.character.dir),
+                "velocity": [velocity],
+            }
         }
 
         return observation, reward
@@ -108,6 +114,7 @@ class FishTank(Environment, ABC):
         self.grid = generate_map([self.x_size, self.y_size], round(self.x_size / 20), 0.6, 0.2)
         self.character.reset(self)
         self.healthItems = []
+        self.time = round(self.time/self.reset_interval) * self.reset_interval
         while len(self.healthItems) < self.maxHealth:
             self.spawn_health()
 
@@ -151,16 +158,17 @@ class FishTank(Environment, ABC):
 
         # Draw output view
         obs_shape = (self.obs_pixels, 3)
-        o = np.reshape(agent.observations[-1, :240], obs_shape)
-        p = np.reshape(agent.predictions[-2, :240], obs_shape)
-
-        err = np.abs(o - p)
+        vision_size = flatdim(self.observation_space["vision"])
+        o = np.reshape(agent.observations[-1, :vision_size], obs_shape)
+        r = np.reshape(agent.reconstructions[-1], obs_shape)
+        p = np.reshape(agent.predictions[-2, :vision_size], obs_shape)
 
         self.draw_observation(o, self.x_size - 180, self.y_size + 80, 180, 20, colour=(50, 50, 50))
 
         if isinstance(agent, AgentController):
-            self.draw_observation(p, self.x_size - 180, self.y_size + 60, 180, 20, colour=(50, 50, 50))
-            self.draw_observation(err, self.x_size - 180, self.y_size + 40, 180, 20, colour=(50, 50, 50))
+            self.draw_observation(r, self.x_size - 180, self.y_size + 60, 180, 20, colour=(50, 50, 50))
+            self.draw_observation(p, self.x_size - 180, self.y_size + 40, 180, 20, colour=(50, 50, 50))
+            self.draw_neural_map(agent.network_vis, self.x_size - 260, self.y_size, 100, 100, colour=(50, 50, 50))
 
             start_x = 250
             start_y = self.y_size + 40
@@ -173,11 +181,10 @@ class FishTank(Environment, ABC):
 
             # Add info to string
 
-            info_str += f"\nLoss: {agent.loss:.3f}"
+            info_str += f"\nReconstr_loss: {agent.reconstruction_loss:.3f}"
+            info_str += f"\nPred_loss: {agent.prediction_loss:.3f}"
             info_str += f"\nReward: {agent.rewards[-1]:.3f}"
-
-            q_value = agent.predictions[-1][-1]
-            info_str += f"\nQ_value: {q_value:.3f}"
+            info_str += f"\nQ_value: {agent.q_value:.3f}"
             info_str += f"\nActions: [{agent.actions[-1][0]:.3f}, {agent.actions[-1][1]:.3f}]"
 
         label = pyglet.text.Label(info_str, font_size=10,
@@ -216,7 +223,23 @@ class FishTank(Environment, ABC):
 
         quad = rendering.PolyLine([(x, y), (x, y + h), (x + w, y + h), (x + w, y)], True)
         quad.set_color(*colour)
-        quad.set_linewidth(2)
+        quad.set_linewidth(1)
+        self.viewer.add_onetime(quad)
+
+    def draw_neural_map(self, map, x, y, w, h, colour=(100, 100, 255)):
+        colors = [(1, 0.3333, 0), (0, 0, 0), (0.4157, 1, 0.2196)]  # Red, Black, Green
+        cmap = LinearSegmentedColormap.from_list('custom_colormap', colors, N=256)
+
+        map = np.flip(np.swapaxes(map, 0, 1), 1)
+        map = cmap(map)[:, :, :3]
+        map = np.ascontiguousarray(map, dtype=np.float32)
+
+        tex = Texture(map, x, y, w, h)
+        self.viewer.add_onetime(tex)
+
+        quad = rendering.PolyLine([(x, y), (x, y + h), (x + w, y + h), (x + w, y)], True)
+        quad.set_color(*colour)
+        quad.set_linewidth(1)
         self.viewer.add_onetime(quad)
 
     def get_observation(self, character):

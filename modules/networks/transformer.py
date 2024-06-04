@@ -50,8 +50,8 @@ class CausalSelfAttention(nn.Module):
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                                 .view(1, 1, config.block_size, config.block_size))
+            self.register_buffer("bias", torch.tril(torch.ones(config.context_size, config.context_size))
+                                 .view(1, 1, config.context_size, config.context_size))
 
     def forward(self, x):
         B, T, C = x.size()  # sequence length, embedding dimensionality (n_embd)
@@ -118,7 +118,7 @@ class Block(nn.Module):
 class TransformerConfig:
     input_size: int = 900
     output_size: int = 900
-    block_size: int = 1024
+    context_size: int = 1024
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
@@ -143,20 +143,19 @@ class Transformer(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        assert config.block_size is not None
+        assert config.context_size is not None
         self.config = config
 
         self.model = nn.ModuleDict(dict(
             drop=nn.Dropout(config.dropout),
             h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            lm_head=nn.Linear(config.n_embd, config.output_size, bias=False)
+            lm_head=nn.Linear(config.n_embd, config.output_size, bias=config.bias)
         ))
         self.to(config.device_type)
         self.optimizer = None
 
         # init all weights
         self.apply(_init_weights)
-
 
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
@@ -168,13 +167,13 @@ class Transformer(nn.Module):
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
 
-    def forward(self, idx, targets=None):
+    def _forward(self, idx):
         b, t, n = idx.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, " \
-                                            f"block size is only {self.config.block_size}"
+        assert t <= self.config.context_size, f"Cannot forward sequence of length {t}, " \
+                                            f"block size is only {self.config.context_size}"
 
         # Compute positional embeddings and add it to sequence
-        pos_emb = self.positional_embedding(self.config.block_size,
+        pos_emb = self.positional_embedding(self.config.context_size,
                                             self.config.n_embd - self.config.input_size)
         pos_emb = pos_emb.unsqueeze(0).expand(b, -1, -1)
         idx = torch.cat((idx, pos_emb), dim=-1)
@@ -184,26 +183,29 @@ class Transformer(nn.Module):
         for block in self.model.h:
             x = block(x)
 
-        latent = x[0]
+        return x
+
+    def forward(self, idx, targets=None):
+        latent = self._forward(idx)
 
         if targets is None:
             # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.model.lm_head(x[:, [-1], :])  # note: using list [-1] to preserve the time dim
+            logits = self.model.lm_head(latent[:, [-1], :])  # note: using list [-1] to preserve the time dim
             loss = None
         else:
             # if we are given some desired targets also calculate the loss
-            logits = self.model.lm_head(x)
-            loss = self.backwards(logits, targets)
+            logits, loss = self.backward(latent, targets)
 
-        return logits.cpu().detach().numpy()[0], loss, latent
+        return logits.cpu().detach().numpy()[0], loss
 
-    def backwards(self, logits, targets):
+    def backward(self, latent, targets):
+        logits = self.model.lm_head(latent)
         loss = F.l1_loss(logits, targets)
 
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         self.optimizer.step()
-        return loss
+        return logits, loss
 
     def positional_embedding(self, length, d_model):
         # If the positional embedding size is not a multiple of 2 (for sin and cos) remove the excess
@@ -223,8 +225,8 @@ class Transformer(nn.Module):
         # model surgery to decrease the block size if necessary
         # e.g. we may load the GPT2 pretrained model checkpoint (block size 1024)
         # but want to use a smaller block size for some smaller, simpler model
-        assert block_size <= self.config.block_size
-        self.config.block_size = block_size
+        assert block_size <= self.config.context_size
+        self.config.context_size = block_size
         # self.model.wpe.weight = nn.Parameter(self.model.wpe.weight[:block_size])
         for block in self.model.h:
             if hasattr(block.attn, 'bias'):
@@ -264,7 +266,7 @@ class Transformer(nn.Module):
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = self.get_num_params()
         cfg = self.config
-        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd // cfg.n_head, cfg.block_size
+        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd // cfg.n_head, cfg.context_size
         flops_per_token = 6 * N + 12 * L * H * Q * T
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
@@ -287,7 +289,7 @@ class Transformer(nn.Module):
         """
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            idx_cond = idx if idx.size(1) <= self.config.context_size else idx[:, -self.config.context_size:]
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
             # pluck the logits at the final step and scale by desired temperature

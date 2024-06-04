@@ -14,7 +14,7 @@ class SaveController(Controller):
         self.input_size = input_size
         self.clear()
 
-    def step(self, input, reward, time):
+    def step(self, input, reward):
         self.data[self.index % SaveController.save_interval] = input
         self.index += 1
 

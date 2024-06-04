@@ -22,7 +22,7 @@ def train():
     iter_num = 0
     min_lr = 0.000001
     controller = AgentController(FishTank.inputType.get_size(), FishTank.output_size)
-    block_size = controller.block_size
+    block_size = controller.context_size
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
     ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
