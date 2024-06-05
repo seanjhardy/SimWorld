@@ -54,19 +54,22 @@ class AgentController(Controller):
         self.observations = None
         self.actions = None
         self.rewards = None
+        self.memories = None
 
         self.latents = None
         self.predictions = None
         self.reconstructions = None
         self.network_vis = None
+        self.q_values = None
 
-        self.q_value = 0
         self.prediction_loss = 0
         self.reconstruction_loss = 0
+        self.policy_loss = 0
 
         # Control variables for enabling training/predicting/saving weights
-        self.train_interval = 1
-        self.predicting = False
+        self.train_interval = -1
+        self.predicting = True
+        self.dreaming = False
         self.save_interval = -1
 
         # Define model architecture
@@ -83,7 +86,7 @@ class AgentController(Controller):
         self.model = DotMap(
             visual_cortex=CVAE(self.latent_vis_size, device=device),
             neocortex=QTransformer(config if config is not None else self.transformerConfig),
-            # rl_block_1=HRLBlock(self.latent_size, self.output_size),
+            rl_block_1=HRLBlock(self.latent_size, self.output_size, actor_only=True),
         )
 
         self.visualizer = ActivationVisualizer(self.model.neocortex)
@@ -104,29 +107,37 @@ class AgentController(Controller):
         # Roll over memories
         self.observations = np.roll(self.observations, shift=-1, axis=0)
         self.latents = np.roll(self.latents, shift=-1, axis=0)
-        if self.predicting or (time % self.train_interval == 0 and self.train_interval != -1):
+        if self.predicting or self.dreaming or \
+            (time % self.train_interval == 0 and self.train_interval != -1):
             self.predictions = np.roll(self.predictions, shift=-1, axis=0)
+            self.q_values = np.roll(self.q_values, shift=-1, axis=0)
             self.reconstructions = np.roll(self.reconstructions, shift=-1, axis=0)
         self.actions = np.roll(self.actions, shift=-1, axis=0)
         self.rewards = np.roll(self.rewards, shift=-1, axis=0)
         self.observations[-1] = flatten(self.env.observation_space, observation)
         self.rewards[-1] = reward
+        # self.memories.add(self.latents[-2], self.q_values, self.actions, reward, self.latents[-1])
 
-        # Produce an action
-        # current_state = torch.from_numpy(input)
-        # current_state = current_state.to(device, non_blocking=True)
-        # actions = self.model.rl_block_1(latent_states[-1])
-        # self.actions = actions.cpu().detach().numpy()
+        # Generate random action
         actions = self.env.random_policy()
         self.actions[-1] = actions
 
         # Quit early if we don't have enough data (Just for training)
-        if time % self.env.reset_interval < self.context_size and self.train_interval != -1:
+        if time % self.env.reset_interval < self.context_size \
+                and self.train_interval != -1 and False:
             return actions
 
         # Make predictions
-        if self.predicting:
+        if self.predicting and not self.dreaming:
             self.predict()
+            self.train_policy()
+
+            latent = torch.tensor(self.latents[-1]).to(torch.float32).to(device, non_blocking=True)
+            actions = self.model.rl_block_1.forward(latent)
+            self.actions[-1] = actions
+
+        if self.dreaming:
+            self.dream()
 
         # Train the agent
         if time % self.train_interval == 0 and self.train_interval != -1:
@@ -137,13 +148,13 @@ class AgentController(Controller):
             # latent space is expressive enough to be useful
             if self.reconstruction_loss < 0.001:
                 x, y = self.get_batch(self.latents, self.actions, self.rewards)
-                latent_predictions = self.train_neocortex(x, y)
+                latent_predictions, q_values = self.train_neocortex(x, y)
                 latent_prediction = torch.from_numpy(latent_predictions[-1, :self.latent_vis_size]) \
                     .unsqueeze(0).to(torch.float32).to(device, non_blocking=True)
                 self.predictions[-1, :self.vision_size] = self.model.visual_cortex.decode(latent_prediction)
 
-                #if self.prediction_loss < 0.05:
-                    #self.train_policy(16)
+            if self.prediction_loss < 0.05:
+                self.train_policy()
         # Save the model every save_interval iterations
         if self.save_interval != -1 and time % self.save_interval == 0:
             self.save_model()
@@ -159,20 +170,41 @@ class AgentController(Controller):
             .pin_memory().to(device, non_blocking=True)
         latents, reconstructions = self.model.visual_cortex.forward(x)
         self.latents[:, :self.latent_vis_size] = latents.cpu().detach().numpy()
+        self.latents[:, self.latent_vis_size:] = self.observations[:, self.vision_size:]
         self.reconstructions[-1] = reconstructions.cpu().detach().numpy()[-1].reshape(-1)
 
         # Neocortex predicts next latent state using action taken
         neocortex_input = np.concatenate([self.latents, self.actions], axis=-1)
         neocortex_input = torch.from_numpy(neocortex_input[1:]).unsqueeze(0).to(device, non_blocking=True)
-        latent_prediction, q_values, _ = self.model.neocortex(neocortex_input, None)
-        self.q_value = q_values[-1]
+        latent_prediction, q_value, _ = self.model.neocortex(neocortex_input, None)
+        self.q_values[-1] = q_value
+
+        self.network_vis = self.visualizer.visualize_activations(self.network_vis.shape)
+
+        # Decode latent prediction back into visual representation
+        latent_vis_prediction = torch.from_numpy(latent_prediction[-1, :self.latent_vis_size]) \
+            .unsqueeze(0).to(torch.float32).to(device, non_blocking=True)
+        self.predictions[-1, :self.vision_size] = self.model.visual_cortex.decode(latent_vis_prediction)
+        self.predictions[-1, self.vision_size:] = latent_prediction[-1, self.latent_vis_size:]
+        self.prediction_loss = np.mean(np.abs(self.predictions[-2] - self.observations[-1]))
+
+    def dream(self):
+        # Neocortex predicts next latent state using action taken
+        neocortex_input = np.concatenate([self.latents[:-1], self.actions[1:]], axis=-1)
+        neocortex_input = torch.from_numpy(neocortex_input).unsqueeze(0).to(device, non_blocking=True)
+        latent_prediction, q_value, _ = self.model.neocortex(neocortex_input, None)
+        self.q_values[-1] = q_value
+        # Overwrite latent with prediction
+        self.latents[-1] = latent_prediction
 
         self.network_vis = self.visualizer.visualize_activations(self.network_vis.shape)
 
         # Decode latent prediction back into visual representation
         latent_prediction = torch.from_numpy(latent_prediction[-1, :self.latent_vis_size]) \
             .unsqueeze(0).to(torch.float32).to(device, non_blocking=True)
-        self.predictions[-1, :self.vision_size] = self.model.visual_cortex.decode(latent_prediction)
+        reconstruction = self.model.visual_cortex.decode(latent_prediction)
+        self.predictions[-1, :self.vision_size] = reconstruction
+        self.reconstructions[-1] = reconstruction
 
     def train_visual_cortex(self, x):
         x = x[:, :self.vision_size].reshape((-1, 3, 1, self.env.obs_pixels))
@@ -186,22 +218,31 @@ class AgentController(Controller):
     def train_neocortex(self, x, y):
         with ctx:
             logits, q_values, loss = self.model.neocortex(x, y)
-        self.q_value = q_values[-1]
+        self.q_values[1:] = q_values
         # Calculate loss of the final prediction
         self.prediction_loss = np.mean(np.abs(logits[-1] - y.cpu().detach().numpy()[0][-1, :-1]))
-        return logits
+        return logits, q_values
 
-    def train_policy(self, batch_size=16):
-        data = self.memories.sample(batch_size)
-        if data is not None:
-            self.model.rl_block_1.train(data)
+    def train_policy(self):
+        # data = self.memories.sample(batch_size)
+        # L1, Q1, R2, L2, Q2
+        data = (self.latents[:self.context_size],
+                self.actions[:self.context_size],
+                self.q_values[:self.context_size],
+                self.rewards,
+                self.latents[1:],
+                self.q_values[1:])
+        data = tuple(torch.tensor(arr).to(torch.float32).to(device, non_blocking=True) for arr in data)
+        self.model.rl_block_1.backward(data)
 
     def reset(self):
         self.observations = np.zeros((self.context_size + 1, self.observation_size), dtype=np.float16)
         self.actions = np.zeros((self.context_size + 1, self.output_size), dtype=np.float16)
         self.rewards = np.zeros(self.context_size, dtype=np.float16)
+        self.memories = ReplayBuffer(1024)
 
         self.latents = np.zeros((self.context_size + 1, self.latent_size), dtype=np.float16)
+        self.q_values = np.zeros(self.context_size + 1, dtype=np.float16)
         self.predictions = np.zeros((self.context_size, self.observation_size), dtype=np.float16)
         self.reconstructions = np.zeros((self.context_size, self.vision_size), dtype=np.float16)
         self.network_vis = np.full((100, 100), 0.5)

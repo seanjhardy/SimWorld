@@ -8,14 +8,16 @@ class Simulation:
         self.agent = agent
         self.rendering = True
         self.state = "playing"
+        self.action = None
         thread = Thread(target=self.process_user_input, daemon=True)
         thread.start()
 
     def run(self):
-        action = None
-        while self.state != "done" and self.state != "paused":
-            state, reward = self.env.step(action)
-            action = self.agent.step(state, reward)
+        while self.state != "done":
+            while self.state == "paused":
+                continue
+            state, reward = self.env.step(self.action)
+            self.action = self.agent.step(state, reward)
             if self.rendering:
                 self.env.render(self.agent)
 
@@ -32,9 +34,10 @@ class Simulation:
                     "reset": self.reset,
                     "play": self.play,
                     "pause": self.pause,
-                    "predict": self.predict,
-                    "train": self.train_speed,
-                    "save": self.save,
+                    "predict": self.predict, "p": self.predict,
+                    "train": self.train_speed, "t": self.train_speed,
+                    "save": self.save, "s": self.save,
+                    "dream": self.dream, "d": self.dream,
                 }
                 command = commands.get(command_type, lambda x: self.invalid_command())
                 command(user_input)
@@ -68,7 +71,6 @@ class Simulation:
 
     def play(self, command):
         self.state = "playing"
-        self.run()
         print("Playing simulation")
         return
 
@@ -91,6 +93,11 @@ class Simulation:
     def predict(self, command):
         self.agent.predicting = not self.agent.predicting
         print(f"Prediction {'enabled' if self.agent.predicting else 'disabled'}")
+        return
+
+    def dream(self, command):
+        self.agent.dreaming = not self.agent.dreaming
+        print(f"Dreaming {'enabled' if self.agent.dreaming else 'disabled'}")
         return
 
     def save(self, command):

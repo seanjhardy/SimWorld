@@ -35,7 +35,7 @@ class QTransformer(Transformer):
             logits, q_values, loss = self.backward(latent, targets)
 
         return logits.cpu().detach().numpy()[0], \
-               q_values.cpu().detach().numpy()[0, :, 0], \
+               q_values.cpu().detach().numpy()[0, 0, 0], \
                loss
 
     def backward(self, latent, targets):

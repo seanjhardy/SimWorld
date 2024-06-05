@@ -168,7 +168,7 @@ class FishTank(Environment, ABC):
         if isinstance(agent, AgentController):
             self.draw_observation(r, self.x_size - 180, self.y_size + 60, 180, 20, colour=(50, 50, 50))
             self.draw_observation(p, self.x_size - 180, self.y_size + 40, 180, 20, colour=(50, 50, 50))
-            self.draw_neural_map(agent.network_vis, self.x_size - 260, self.y_size, 100, 100, colour=(50, 50, 50))
+            self.draw_neural_map(agent.network_vis, self.x_size - 280, self.y_size, 100, 100, colour=(50, 50, 50))
 
             start_x = 250
             start_y = self.y_size + 40
@@ -184,7 +184,7 @@ class FishTank(Environment, ABC):
             info_str += f"\nReconstr_loss: {agent.reconstruction_loss:.3f}"
             info_str += f"\nPred_loss: {agent.prediction_loss:.3f}"
             info_str += f"\nReward: {agent.rewards[-1]:.3f}"
-            info_str += f"\nQ_value: {agent.q_value:.3f}"
+            info_str += f"\nQ_value: {agent.q_values[-1]:.3f}"
             info_str += f"\nActions: [{agent.actions[-1][0]:.3f}, {agent.actions[-1][1]:.3f}]"
 
         label = pyglet.text.Label(info_str, font_size=10,
