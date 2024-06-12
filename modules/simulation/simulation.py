@@ -30,7 +30,7 @@ class Simulation:
                 command_type = self.get_argument(user_input, 0)
                 commands = {
                     "exit": self.exit_program,
-                    "render": self.render,
+                    "render": self.render, "r": self.render,
                     "reset": self.reset,
                     "play": self.play,
                     "pause": self.pause,
@@ -38,6 +38,7 @@ class Simulation:
                     "train": self.train_speed, "t": self.train_speed,
                     "save": self.save, "s": self.save,
                     "dream": self.dream, "d": self.dream,
+                    "view": self.view, "v": self.view,
                 }
                 command = commands.get(command_type, lambda x: self.invalid_command())
                 command(user_input)
@@ -100,6 +101,15 @@ class Simulation:
         print(f"Dreaming {'enabled' if self.agent.dreaming else 'disabled'}")
         return
 
+    def view(self, command):
+        try:
+            view = int(self.get_argument(command, 1))
+        except Exception as e:
+            view = 1 - min(self.env.view, 1)
+        self.env.view = view
+        print(f"Viewmode: {self.env.view}")
+        return
+
     def save(self, command):
         try:
             save_interval = int(self.get_argument(command, 1))
@@ -108,7 +118,8 @@ class Simulation:
             self.agent.save_interval = save_interval
             print(f"Set save interval to {save_interval}")
         except Exception as e:
-            print(e)
+            self.agent.save_model()
+            print(f"Quicksaving {self.agent.model_name()}")
         return
 
     def reset(self, command):

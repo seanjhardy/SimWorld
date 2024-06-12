@@ -1,60 +1,112 @@
 import math
 
 import numpy as np
+import torch
 from torch import nn
 from torch.nn import functional as F
-from scipy.ndimage import zoom
-from modules.networks.transformer import LayerNorm, CausalSelfAttention, Block, MLP
 
 
 class ActivationVisualizer:
     def __init__(self, model):
         self.model = model
         self.activations = {}
+        self.attention = {}
+        self.last_activations = {}
         self.hooks = []
 
     def register_hooks(self):
         def get_activation(name):
             def hook(model, input, output):
-                self.activations[name] = output.detach()
+                output = output.detach().cpu().numpy()
+                if len(output.shape) == 4:
+                    output = np.sum(output[0], axis=0)
+                elif len(output.shape) == 3:
+                    output = output[0][-1]
+                else:
+                    output = output[-1]
+
+                if "attn_dropout" in name:
+                    self.attention[name] = output
+                    return
+
+                if "c_attn" in name:
+                    q, k, v = np.split(output, 3, axis=-1)
+                    self.activations[name + "q"] = q
+                    self.activations[name + "k"] = k
+                    self.activations[name + "v"] = v
+                    return
+
+                self.activations[name] = output
             return hook
 
         for name, layer in self.model.named_modules():
-            if isinstance(layer, (nn.Linear, CausalSelfAttention)):
-                hook = layer.register_forward_hook(get_activation(name))
-                self.hooks.append(hook)
+            if not isinstance(layer, (nn.Linear, nn.Dropout)):
+                continue
+            if isinstance(layer, nn.Dropout) and "attn_dropout" not in name:
+                continue
+            hook = layer.register_forward_hook(get_activation(name))
+            self.hooks.append(hook)
 
-    def normalize_and_resize(self, activation, size):
-        activation = activation / (activation.max() - activation.min())
-        activation = activation - activation.mean() + 0.5
-        if len(activation.shape) == 3:
-            activation = activation[0][-1]
-        else:
-            activation = activation[0]
-        activation = activation.view(1, 1, -1)
+    def reshape_aspect_ratio(self, arr, aspect_ratio):
+        total_elements = np.prod(arr.shape)
 
-        activation_resized = F.interpolate(activation, size=size, mode='nearest')
+        # Calculate the number of rows needed based on the aspect ratio
+        cols = max(math.floor(np.sqrt(total_elements * aspect_ratio)), 1)
+        rows = max(math.floor(total_elements / cols), 1)
+
+        # Ensure we have enough elements to fill the reshaped tensor
+        elements_needed = rows * cols
+
+        if total_elements < elements_needed:
+            new = elements_needed - total_elements
+            arr = np.concatenate([arr, np.full(new, 0.5)])
+
+        reshaped_tensor = arr[:elements_needed].reshape(rows, cols)
+
+        return reshaped_tensor
+
+    def normalize_and_resize(self, activation, size, axis=None):
+        activation = activation / (activation.max() - activation.min() + 1e-8)
+        activation = activation - activation.mean(axis) + 0.5
+        # activation = np.clip(activation, 0.5, 1)
+
+        aspect_ratio = size[1] / size[0]
+        activation = self.reshape_aspect_ratio(activation, aspect_ratio)
+        activation = activation.reshape(1, 1, activation.shape[0], activation.shape[1])
+
+        activation_resized = F.interpolate(torch.from_numpy(activation).to(torch.float32), size=size, mode='nearest')
         activation_resized = activation_resized.squeeze()
-        return activation_resized.cpu().numpy()
+        return activation_resized.numpy()
 
-    def visualize_activations(self, shape):
-        size = 0
-        pixels = shape[0] * shape[1]
+    def visualize_activations(self, shape=(500, 500)):
+        if len(self.last_activations.keys()) == 0:
+            self.last_activations = dict(self.activations)
+            return np.full(shape, 0.5)
+        num_activations = 0
         for name, activation in self.activations.items():
-            size += activation[-1].size(0)
-        item_per_pixel = pixels/size
+            num_activations += activation.shape[-1]
+        w_per_activation = shape[0]/num_activations
         i = 0
-        vis = np.full((shape[0] * shape[1]), 0.5)
+        vis = np.full((shape[0], shape[1]), 0.5)
         for name, activation in self.activations.items():
-            layer_size = math.floor(item_per_pixel * activation[-1].size(0))
-            if layer_size != 0:
-                activation_resized = self.normalize_and_resize(activation, (layer_size,))
-                vis[i: i + layer_size] = activation_resized
-            i += layer_size
-        vis = vis.reshape(shape)
-        width_ratio = shape[0] / vis.shape[0]
-        #vis = zoom(vis, (width_ratio, 1), order=1)
+            width = math.floor(w_per_activation * activation.shape[-1])
+            if width == 0 or i + width > vis.shape[0]:
+                continue
+            activation_resized = self.normalize_and_resize(activation, (width, shape[1]))
+            w = activation_resized.shape[0]
+            vis[i: i + w] = activation_resized
+            i += width
+        self.last_activations = dict(self.activations)
         return vis
+
+    def visualize_attention(self, layer, shape=(500, 500)):
+        for name, attention in self.attention.items():
+            if str(layer - 1) in name:
+                vis = self.normalize_and_resize(attention[:100, :100], shape)
+                vis = np.flip(vis, 0)
+                vis = np.flip(vis, 1)
+                return vis
+        return np.full(shape, 0.4)
 
     def remove_hooks(self):
         for hook in self.hooks:

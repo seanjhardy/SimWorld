@@ -25,8 +25,8 @@ class Texture(rendering.Geom):
         glBindTexture(texture.target, texture.id)
         glTexImage2D(texture.target, 0, GL_RGB, width, height, 0,
                      GL_RGB, GL_FLOAT, array.ctypes.data)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
         glBindTexture(texture.target, 0)
         return texture
 

@@ -31,6 +31,7 @@ class CVAE(nn.Module):
             )
         ))
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        self.device = device
         self.to(device)
 
     def forward(self, x):
@@ -41,8 +42,17 @@ class CVAE(nn.Module):
 
         latent = self.reparameterize(mu, log_var)
 
-        x = self.model.decoder(latent)
-        return latent, x
+        reconstruction = self.model.decoder(latent)
+        return latent, reconstruction, mu, log_var
+
+    def encode(self, x):
+        x = self.model.encoder(x)
+
+        mu = self.model.fc_mu(x)
+        log_var = self.model.fc_log_var(x)
+
+        latent = self.reparameterize(mu, log_var)
+        return latent.cpu().detach().numpy()
 
     def decode(self, latent):
         reconstruction = self.model.decoder(latent)
@@ -58,9 +68,21 @@ class CVAE(nn.Module):
         sample = mu + (eps * std)  # sampling
         return sample
 
+    def kl_divergence(self, mu, log_var):
+        """
+        :param mu: mean from the encoder's latent space
+        :param log_var: log variance from the encoder's latent space
+        """
+        return -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1).mean()
+
+
     def backward(self, x):
-        latent, reconstruction = self(x)
-        loss = F.mse_loss(reconstruction, x)
+        latent, reconstruction, mu, log_var = self(x)
+        reconstruction_loss_l2 = F.mse_loss(reconstruction, x)
+        #kl_loss = 0.00001 * self.kl_divergence(mu, log_var)
+        temporal_consistency_loss = 0.05 * torch.mean(torch.abs(reconstruction[1:] - reconstruction[:-1]))
+        loss = reconstruction_loss_l2 + temporal_consistency_loss # + kl_loss
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()

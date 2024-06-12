@@ -2,6 +2,7 @@ import math
 import inspect
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -20,11 +21,11 @@ class LayerNorm(nn.Module):
 
 
 def generate_attention_mask(rows, cols):
-    attn_mask = torch.ones(rows, cols, dtype=torch.bool).tril(diagonal=0)
-    row_indices = torch.arange(rows).reshape(-1, 1)
+    attn_mask = torch.ones(rows, cols, dtype=torch.bool).diag(diagonal=0)
+    """row_indices = torch.arange(rows).reshape(-1, 1)
     col_indices = torch.arange(cols)
     result = (row_indices * col_indices) / (rows * cols)
-    result = result < (1 - torch.rand((rows, cols)) * 0.1)
+    result = result < (1 - torch.rand((rows, cols)) * 0.1)"""
     result = attn_mask
     result = torch.where(result == 0, -torch.inf, 0)
     return result.to("cuda", non_blocking=True)
@@ -40,7 +41,7 @@ class CausalSelfAttention(nn.Module):
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         # regularization
-        self.attn_dropout = nn.Dropout(config.dropout)
+        self.attn_dropout = nn.Dropout(config.attn_dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -48,7 +49,6 @@ class CausalSelfAttention(nn.Module):
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.context_size, config.context_size))
                                  .view(1, 1, config.context_size, config.context_size))
@@ -123,6 +123,7 @@ class TransformerConfig:
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.0
+    attn_dropout: float = 0.0
     bias: bool = False  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     weight_decay: float = 0.0001,
     learning_rate: float = 0.001,
@@ -139,15 +140,31 @@ def _init_weights(module):
         torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
 
+def cosine_embedding(embed_range, length, values=None):
+    excess = length - math.floor(length/2) * 2
+    pe_length = length - excess
+
+    if values is None:
+        values = np.arange(0, embed_range)
+    values = np.expand_dims(values, 1)
+
+    pe = np.zeros((values.shape[0], pe_length))
+    div_term = np.exp((np.arange(0, pe_length, 2, dtype=np.float32) *
+                       -(4 / pe_length)))
+    pe[:, 0::2] = np.sin(values * div_term)
+    pe[:, 1::2] = np.cos(values * div_term)
+    pe = np.pad(pe, (0, excess))
+    return pe
+
+
 class Transformer(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config : TransformerConfig):
         super().__init__()
         assert config.context_size is not None
         self.config = config
 
         self.model = nn.ModuleDict(dict(
-            drop=nn.Dropout(config.dropout),
             h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             lm_head=nn.Linear(config.n_embd, config.output_size, bias=config.bias)
         ))
@@ -173,13 +190,13 @@ class Transformer(nn.Module):
                                             f"block size is only {self.config.context_size}"
 
         # Compute positional embeddings and add it to sequence
-        pos_emb = self.positional_embedding(self.config.context_size,
-                                            self.config.n_embd - self.config.input_size)
+        pos_emb = cosine_embedding(self.config.context_size, 40)
+        pos_emb = torch.from_numpy(pos_emb).to(self.config.device_type).to(torch.float32)
         pos_emb = pos_emb.unsqueeze(0).expand(b, -1, -1)
-        idx = torch.cat((idx, pos_emb), dim=-1)
+        padding = torch.zeros(self.config.n_embd - (self.config.input_size + 40))
+        padding = padding.to(self.config.device_type).unsqueeze(0).expand(b, t, -1)
+        x = torch.cat((idx, pos_emb, padding), dim=-1)
 
-        # Apply dropout layer
-        x = self.model.drop(idx)
         for block in self.model.h:
             x = block(x)
 
@@ -206,20 +223,6 @@ class Transformer(nn.Module):
         loss.backward()
         self.optimizer.step()
         return logits, loss
-
-    def positional_embedding(self, length, d_model):
-        # If the positional embedding size is not a multiple of 2 (for sin and cos) remove the excess
-        excess = d_model - math.floor(d_model/2) * 2
-        d_model = d_model - excess
-
-        pe = torch.zeros(length, d_model).pin_memory().to("cuda", non_blocking=True)
-        position = torch.arange(0, length).unsqueeze(1)
-        div_term = torch.exp((torch.arange(0, d_model, 2, dtype=torch.float) *
-                              -(math.log(10000.0) / d_model)))
-        pe[:, 0::2] = torch.sin(position.float() * div_term)
-        pe[:, 1::2] = torch.cos(position.float() * div_term)
-        pe = F.pad(pe, (0, excess))
-        return pe
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary

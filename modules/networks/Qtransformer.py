@@ -22,7 +22,7 @@ class QTransformer(Transformer):
         self.apply(_init_weights)
         self.configure_optimizers(config)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, rewards=None):
         latent = self._forward(idx)
 
         if targets is None:
@@ -32,29 +32,29 @@ class QTransformer(Transformer):
             loss = None
         else:
             # if we are given some desired targets also calculate the loss
-            logits, q_values, loss = self.backward(latent, targets)
+            logits, q_values, loss = self.backward(latent, targets, rewards)
 
         return logits.cpu().detach().numpy()[0], \
-               q_values.cpu().detach().numpy()[0, 0, 0], \
+               q_values.cpu().detach().numpy()[0, :, 0], \
                loss
 
-    def backward(self, latent, targets):
-        logits = self.model.lm_head(latent)
-        q_values = self.model.q_head(latent)  # Predicted Q values (b, t, 1)
-        rewards = targets[:, :, -1]  # Reward in format of (b, t)
+    def backward(self, latents, targets, rewards):
+        logits = self.model.lm_head(latents)
+        q_values = self.model.q_head(latents)  # Predicted Q values (b, t, 1)
 
-        cumulative_reward = logits[:, [-1], -1].detach()  # Final q value (b, t)
+        cumulative_reward = q_values[:, -1, 0].detach()  # Final q value (b, t)
         target_q_values = torch.zeros_like(q_values)
 
         # Compute the target Q values in reverse order
-        for t in reversed(range(targets.size(1))):
+        for t in reversed(range(rewards.size(1))):
             cumulative_reward = rewards[:, t] + self.gamma * cumulative_reward
             target_q_values[:, t, 0] = cumulative_reward
 
         critic_loss = ((target_q_values - q_values) ** 2).mean() * 0.00001
 
-        reconstruction_loss = F.l1_loss(logits, targets[:, :, :-1])
+        reconstruction_loss = F.mse_loss(logits, targets)
         loss = reconstruction_loss + critic_loss
+
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         self.optimizer.step()

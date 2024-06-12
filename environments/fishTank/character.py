@@ -54,7 +54,7 @@ class Character:
         if random.random() < 0.2 - clamp(0, speed / 5, 1) * 0.2 or reset:
             self.target_dir = random.random() * math.pi * 2
         if random.random() < 0.05 or reset:
-            self.target_speed = random.random()
+            self.target_speed = random.random() * (-1 if random.random() < 0.2 else 1)
         if self.collision_force > 0.1:
             self.target_dir = self.dir + math.pi
         return actions

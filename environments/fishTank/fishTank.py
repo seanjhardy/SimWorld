@@ -11,9 +11,10 @@ from gym.vector.utils import spaces
 from environments.environment import Environment
 from environments.fishTank.character import Character
 from environments.fishTank.health import Health
-from environments.fishTank.mapGenerator import generate_map
+from environments.fishTank.mapGenerator import generate_map, generate_maze
 from environments.fishTank.wall import Wall
 from modules.collisions.collisions import solve_collisions
+from modules.networks.transformer import cosine_embedding
 from modules.raymarch.ray import ray_march
 from modules.renderingTools import Texture
 from modules.utils.mathHelper import angle_to_vector, get_velocity
@@ -43,19 +44,34 @@ class FishTank(Environment, ABC):
     def __init__(self):
         super().__init__("FishTank-v0")
         self.grid = None
-        self.viewer = None
 
         self.x_size = 400
         self.y_size = 300
+
+        self.view = 0
+        self.viewer = rendering.Viewer(WINDOW_W, WINDOW_H)
+        bg = rendering.FilledPolygon([(0, 0), (0, WINDOW_H), (WINDOW_W, WINDOW_H), (WINDOW_W, 0)])
+        bg.set_color(0, 0, 0)
+        border = rendering.PolyLine([(0, 0), (0, self.y_size), (self.x_size, self.y_size), (self.x_size, 0)],
+                                    close=True)
+        border.set_linewidth(5)
+        border.set_color(*Wall.colour)
+
+        self.viewer.add_geom(bg)
+        self.viewer.add_geom(border)
+        self.viewer.transform = rendering.Transform()
+        self.viewer.window.push_handlers(
+            on_mouse_motion=self.on_mouse_motion
+        )
 
         self.action_space = spaces.Box(low=-1, high=1, shape=(2,))
         self.observation_space = spaces.OrderedDict({
             "vision": spaces.Box(low=0, high=1, shape=(self.obs_pixels * 3,)),
             "dynamics": spaces.OrderedDict({
                 "collision_force": spaces.Box(low=-np.inf, high=np.inf, shape=(1,)),
-                "position": spaces.Box(low=0, high=1, shape=(2,)),
                 "direction": spaces.Box(low=0, high=1, shape=(2,)),
                 "velocity": spaces.Box(low=0, high=1, shape=(1,)),
+                "position": spaces.Box(low=0, high=1, shape=(40,)),
             })
         })
         self.time = 1
@@ -98,9 +114,12 @@ class FishTank(Environment, ABC):
             "vision": self.get_observation(self.character),
             "dynamics": {
                 "collision_force": [self.character.collision_force],
-                "position": [self.character.body[0].x / self.x_size, self.character.body[0].y / self.y_size],
                 "direction": angle_to_vector(self.character.dir),
                 "velocity": [velocity],
+                "position": np.concatenate([
+                    cosine_embedding(self.x_size, 20, np.array([self.character.body[0].x]))[0],
+                    cosine_embedding(self.y_size, 20, np.array([self.character.body[0].y]))[0]
+                ]),
             }
         }
 
@@ -112,6 +131,7 @@ class FishTank(Environment, ABC):
     def reset(self):
         # Reset the state of the environment to an initial state
         self.grid = generate_map([self.x_size, self.y_size], round(self.x_size / 20), 0.6, 0.2)
+        #self.grid = generate_maze([self.x_size, self.y_size], round(self.x_size / 20))
         self.character.reset(self)
         self.healthItems = []
         self.time = round(self.time/self.reset_interval) * self.reset_interval
@@ -126,23 +146,28 @@ class FishTank(Environment, ABC):
     def render(self, agent, mode='human', close=False):
         from modules.controller.agentController import AgentController
 
-        info_str = f"Time: {self.time}"
-
-        if self.viewer is None:
-            self.viewer = rendering.Viewer(WINDOW_W, WINDOW_H)
-            bg = rendering.FilledPolygon([(0, 0), (0, WINDOW_H), (WINDOW_W, WINDOW_H), (WINDOW_W, 0)])
-            bg.set_color(0, 0, 0)
-            border = rendering.PolyLine([(0, 0), (0, self.y_size), (self.x_size, self.y_size), (self.x_size, 0)],
-                                        close=True)
-            border.set_linewidth(5)
-            border.set_color(*Wall.colour)
-
-            self.viewer.add_geom(bg)
-            self.viewer.add_geom(border)
-            self.viewer.transform = rendering.Transform()
-
         scale = max(WINDOW_W / self.x_size, WINDOW_H / self.x_size)
         self.viewer.transform.set_scale(scale, scale)
+
+        # Get output
+        obs_shape = (self.obs_pixels, 3)
+        vision_size = flatdim(self.observation_space["vision"])
+        o = np.reshape(agent.observations[-2, :vision_size], obs_shape)
+        r = np.reshape(agent.reconstructions[-2], obs_shape)
+        p = np.reshape(agent.predictions[-2, :vision_size], obs_shape)
+
+        if self.view != 0:
+            self.viewer.transform.set_scale(1, 1)
+            if self.view == 1:
+                network_vis = agent.visualizer.visualize_activations((500, 500))
+            else:
+                network_vis = agent.visualizer.visualize_attention(self.view - 1, (500, 500))
+            self.draw_neural_map(network_vis, WINDOW_W*0.025, WINDOW_H*0.025, WINDOW_W*0.95, WINDOW_H*0.95, colour=(50, 50, 50))
+            self.draw_observation(o, WINDOW_W - 180, 40, 180, 20, colour=(50, 50, 50))
+            self.draw_observation(r, WINDOW_W - 180, 20, 180, 20, colour=(50, 50, 50))
+            self.draw_observation(p, WINDOW_W - 180, 0, 180, 20, colour=(50, 50, 50))
+
+            return self.viewer.render()
 
         for x in range(len(self.grid)):
             for y in range(len(self.grid[0])):
@@ -156,19 +181,13 @@ class FishTank(Environment, ABC):
         # Draw bot
         self.character.render(self.viewer)
 
-        # Draw output view
-        obs_shape = (self.obs_pixels, 3)
-        vision_size = flatdim(self.observation_space["vision"])
-        o = np.reshape(agent.observations[-1, :vision_size], obs_shape)
-        r = np.reshape(agent.reconstructions[-1], obs_shape)
-        p = np.reshape(agent.predictions[-2, :vision_size], obs_shape)
+        self.draw_observation(o, WINDOW_W/scale - 180, WINDOW_H/scale - 20, 180, 20, colour=(50, 50, 50))
 
-        self.draw_observation(o, self.x_size - 180, self.y_size + 80, 180, 20, colour=(50, 50, 50))
 
+        info_str = f"Time: {self.time}"
         if isinstance(agent, AgentController):
-            self.draw_observation(r, self.x_size - 180, self.y_size + 60, 180, 20, colour=(50, 50, 50))
-            self.draw_observation(p, self.x_size - 180, self.y_size + 40, 180, 20, colour=(50, 50, 50))
-            self.draw_neural_map(agent.network_vis, self.x_size - 280, self.y_size, 100, 100, colour=(50, 50, 50))
+            self.draw_observation(r, WINDOW_W/scale - 180, WINDOW_H/scale - 40, 180, 20, colour=(50, 50, 50))
+            self.draw_observation(p, WINDOW_W/scale - 180, WINDOW_H/scale - 60, 180, 20, colour=(50, 50, 50))
 
             start_x = 250
             start_y = self.y_size + 40
@@ -196,6 +215,10 @@ class FishTank(Environment, ABC):
         self.viewer.add_label(label)
 
         return self.viewer.render()
+
+    def on_mouse_motion(self, x, y, dx, dy):
+        self.mouse_x = x
+        self.mouse_y = y
 
     def spawn_health(self):
         if len(self.healthItems) >= self.maxHealth:
@@ -230,7 +253,7 @@ class FishTank(Environment, ABC):
         colors = [(1, 0.3333, 0), (0, 0, 0), (0.4157, 1, 0.2196)]  # Red, Black, Green
         cmap = LinearSegmentedColormap.from_list('custom_colormap', colors, N=256)
 
-        map = np.flip(np.swapaxes(map, 0, 1), 1)
+        map = np.swapaxes(map, 0, 1)
         map = cmap(map)[:, :, :3]
         map = np.ascontiguousarray(map, dtype=np.float32)
 

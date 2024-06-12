@@ -2,6 +2,7 @@ import math
 import numpy as np
 import random
 import noise
+from environments.maze.maze import Maze
 
 
 def generate_map(map_size, square_size, edge_probability, center_probability):
@@ -37,3 +38,12 @@ def generate_map(map_size, square_size, edge_probability, center_probability):
             map_grid[x][y] = probability < edge_dropoff
 
     return map_grid
+
+
+def generate_maze(map_size, square_size):
+    x_size = round(map_size[0] / square_size)
+    y_size = round(map_size[1] / square_size)
+    map_grid = np.zeros((x_size, y_size))
+    start_point = np.array([0, 0])
+    maze = Maze(map_grid, start_point)
+    return maze.maze.astype(bool)
