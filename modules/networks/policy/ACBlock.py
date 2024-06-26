@@ -1,10 +1,11 @@
 import math
 import torch
 from torch import nn, optim
-from torch.distributions import Normal
+
+from modules.networks.policy.actor import Actor
+from modules.networks.policy.critic import Critic
 
 
-# Actor critic block
 class ACBlock(nn.Module):
 
     def __init__(self, state_size, action_size, n_embed, device="cuda", actor_only=False):
@@ -63,54 +64,7 @@ class ACBlock(nn.Module):
         if not self.actor_only:
             loss += critic_loss
 
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         self.optimizer.step()
 
-
-class Actor(nn.Module):
-    def __init__(self, state_size, action_size, n_embed):
-        super(Actor, self).__init__()
-        self.model = nn.ModuleDict(dict(
-            fc1=nn.Linear(state_size, n_embed),
-            fc2=nn.Linear(n_embed, n_embed),
-            mu=nn.Linear(n_embed, action_size),
-            var=nn.Linear(n_embed, action_size),
-            relu=nn.ReLU(),
-            tanh=nn.Tanh(),
-            softplus=nn.Softplus(),
-            sigmoid=nn.Sigmoid(),
-        ))
-
-    def forward(self, state):
-        x = self.model.relu(self.model.fc1(state))
-        x = self.model.relu(self.model.fc2(x))
-        mean = self.model.tanh(self.model.mu(x))
-        var = self.model.softplus(self.model.var(x)) + 1e-6
-        std = torch.sqrt(var)
-
-        dist = Normal(mean, std)
-        sample = dist.rsample()
-        action = torch.clamp(sample, min=-1.0, max=1.0)
-
-        log_prob = dist.log_prob(sample)
-        # log_prob = - ((mean - sample) ** 2) / (2*var) \
-        #           - torch.log(torch.sqrt(2 * math.pi * var))
-        return action, log_prob, var
-
-
-class Critic(nn.Module):
-    def __init__(self, state_size, action_size, n_embed):
-        super(Critic, self).__init__()
-        self.model = nn.ModuleDict(dict(
-            fc1=nn.Linear(state_size + action_size, n_embed),
-            fc2=nn.Linear(n_embed, n_embed),
-            fc3=nn.Linear(n_embed, 1),
-            relu=nn.ReLU(),
-        ))
-
-    def forward(self, state, action):
-        x = torch.cat([state, action], dim=-1)
-        x = self.model.relu(self.model.fc1(x))
-        x = self.model.relu(self.model.fc2(x))
-        return self.model.fc3(x)

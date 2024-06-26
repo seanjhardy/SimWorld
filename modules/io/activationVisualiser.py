@@ -5,19 +5,35 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from modules.networks.bithtm import SpatialPooler
+
 
 class ActivationVisualizer:
-    def __init__(self, model):
-        self.model = model
+    def __init__(self, models):
+        self.models = models
         self.activations = {}
         self.attention = {}
         self.last_activations = {}
         self.hooks = []
+        self.active = False
 
     def register_hooks(self):
         def get_activation(name):
             def hook(model, input, output):
-                output = output.detach().cpu().numpy()
+                if not self.active:
+                    return
+                try:
+                    output = output.detach().cpu().numpy()
+                except:
+                    output = output
+
+                if isinstance(output, SpatialPooler.State):
+                    self.activations[name] = output.get_bits()
+                    return
+                if "identity" in name:
+                    self.activations[name] = output
+                    return
+
                 if len(output.shape) == 4:
                     output = np.sum(output[0], axis=0)
                 elif len(output.shape) == 3:
@@ -39,13 +55,14 @@ class ActivationVisualizer:
                 self.activations[name] = output
             return hook
 
-        for name, layer in self.model.named_modules():
-            if not isinstance(layer, (nn.Linear, nn.Dropout)):
-                continue
-            if isinstance(layer, nn.Dropout) and "attn_dropout" not in name:
-                continue
-            hook = layer.register_forward_hook(get_activation(name))
-            self.hooks.append(hook)
+        for model in self.models:
+            for name, layer in model.named_modules():
+                if not isinstance(layer, (nn.Linear, nn.Dropout, nn.Identity, SpatialPooler)):
+                    continue
+                if isinstance(layer, nn.Dropout) and "attn_dropout" not in name:
+                    continue
+                hook = layer.register_forward_hook(get_activation(name))
+                self.hooks.append(hook)
 
     def reshape_aspect_ratio(self, arr, aspect_ratio):
         total_elements = np.prod(arr.shape)

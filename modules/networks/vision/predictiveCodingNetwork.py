@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from modules.networks.predictiveCodingLayer import PredictiveCodingLayer
+from modules.networks.vision.predictiveCodingLayer import PredictiveCodingLayer
 
 
 class PredictiveCodingNetwork(nn.Module):

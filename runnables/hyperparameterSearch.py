@@ -8,7 +8,7 @@ import pandas as pd
 import torch
 
 from environments.fishTank.fishTank import FishTank
-from modules.controller.agentController import AgentController, device_type
+from modules.controller.HRLController import HRLController, device_type
 from contextlib import nullcontext
 
 from modules.networks.transformer import TransformerConfig
@@ -24,7 +24,7 @@ def train(config, learning_rate):
     lr_decay_iters = 250  # should be ~= max_iters per Chinchilla
     iter_num = 0
     min_lr = 0.000001
-    controller = AgentController(FishTank.inputType.get_size(), FishTank.output_size, config=config)
+    controller = HRLController(FishTank.inputType.get_size(), FishTank.output_size, config=config)
     block_size = config.context_size
     dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
     ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]

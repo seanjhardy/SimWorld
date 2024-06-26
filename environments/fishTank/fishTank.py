@@ -9,16 +9,15 @@ from gym.spaces import flatten, flatdim
 from gym.vector.utils import spaces
 
 from environments.environment import Environment
-from environments.fishTank.character import Character
+from environments.fishTank.fish import Character
 from environments.fishTank.health import Health
-from environments.fishTank.mapGenerator import generate_map, generate_maze
+from environments.fishTank.mapGenerator import generate_map
 from environments.fishTank.wall import Wall
 from modules.collisions.collisions import solve_collisions
-from modules.networks.transformer import cosine_embedding
+from modules.controller import HTMController
 from modules.raymarch.ray import ray_march
 from modules.renderingTools import Texture
 from modules.utils.mathHelper import angle_to_vector, get_velocity
-import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
 WINDOW_W = 500
@@ -39,7 +38,8 @@ class FishTank(Environment, ABC):
     """
     metadata = {'render.modes': ['human']}
     reset_interval = 5000
-    obs_pixels = 80
+    obs_pixels = 160
+    stereoscopic = True
 
     def __init__(self):
         super().__init__("FishTank-v0")
@@ -47,6 +47,8 @@ class FishTank(Environment, ABC):
 
         self.x_size = 400
         self.y_size = 300
+        self.character = Character(self.x_size / 2, self.y_size / 2, obs_pixels=FishTank.obs_pixels)
+
 
         self.view = 0
         self.viewer = rendering.Viewer(WINDOW_W, WINDOW_H)
@@ -68,16 +70,15 @@ class FishTank(Environment, ABC):
         self.observation_space = spaces.OrderedDict({
             "vision": spaces.Box(low=0, high=1, shape=(self.obs_pixels * 3,)),
             "dynamics": spaces.OrderedDict({
-                "collision_force": spaces.Box(low=-np.inf, high=np.inf, shape=(1,)),
+                "collision_force": spaces.Box(low=-np.inf, high=np.inf, shape=(len(self.character.body),)),
                 "direction": spaces.Box(low=0, high=1, shape=(2,)),
                 "velocity": spaces.Box(low=0, high=1, shape=(1,)),
-                "position": spaces.Box(low=0, high=1, shape=(40,)),
+                "position": spaces.Box(low=0, high=1, shape=(2,)),
             })
         })
         self.time = 1
         self.maxHealth = 8
         self.healthItems = []
-        self.character = Character(self.x_size / 2, self.y_size / 2, obs_pixels=FishTank.obs_pixels)
         self.reset()
 
     def step(self, actions: list):
@@ -100,8 +101,8 @@ class FishTank(Environment, ABC):
                 self.spawn_health()
 
         # Penalise collisions
-        if self.character.collision_force > 0.05:
-            reward -= 0.5 + self.character.collision_force * 3
+        if abs(self.character.collision_force[0]) > 0.05:
+            reward -= 0.5 + self.character.collision_force[0] * 3
 
         # Add reward for going faster (assuming forward thrust > 0 so reversing isn't penalised)
         velocity = get_velocity(self.character.body[0]) / self.character.maxAccel
@@ -113,13 +114,10 @@ class FishTank(Environment, ABC):
         observation = {
             "vision": self.get_observation(self.character),
             "dynamics": {
-                "collision_force": [self.character.collision_force],
+                "collision_force": self.character.collision_force,
                 "direction": angle_to_vector(self.character.dir),
                 "velocity": [velocity],
-                "position": np.concatenate([
-                    cosine_embedding(self.x_size, 20, np.array([self.character.body[0].x]))[0],
-                    cosine_embedding(self.y_size, 20, np.array([self.character.body[0].y]))[0]
-                ]),
+                "position": [self.character.body[0].x, self.character.body[0].y],
             }
         }
 
@@ -144,7 +142,8 @@ class FishTank(Environment, ABC):
             self.viewer = None
 
     def render(self, agent, mode='human', close=False):
-        from modules.controller.agentController import AgentController
+        from modules.controller.HRLController import HRLController
+        from modules.controller.HTMController import HTMController
 
         scale = max(WINDOW_W / self.x_size, WINDOW_H / self.x_size)
         self.viewer.transform.set_scale(scale, scale)
@@ -152,22 +151,26 @@ class FishTank(Environment, ABC):
         # Get output
         obs_shape = (self.obs_pixels, 3)
         vision_size = flatdim(self.observation_space["vision"])
-        o = np.reshape(agent.observations[-2, :vision_size], obs_shape)
-        r = np.reshape(agent.reconstructions[-2], obs_shape)
-        p = np.reshape(agent.predictions[-2, :vision_size], obs_shape)
 
-        if self.view != 0:
-            self.viewer.transform.set_scale(1, 1)
-            if self.view == 1:
-                network_vis = agent.visualizer.visualize_activations((500, 500))
-            else:
-                network_vis = agent.visualizer.visualize_attention(self.view - 1, (500, 500))
-            self.draw_neural_map(network_vis, WINDOW_W*0.025, WINDOW_H*0.025, WINDOW_W*0.95, WINDOW_H*0.95, colour=(50, 50, 50))
-            self.draw_observation(o, WINDOW_W - 180, 40, 180, 20, colour=(50, 50, 50))
-            self.draw_observation(r, WINDOW_W - 180, 20, 180, 20, colour=(50, 50, 50))
-            self.draw_observation(p, WINDOW_W - 180, 0, 180, 20, colour=(50, 50, 50))
+        if isinstance(agent, (HRLController, HTMController)):
+            o = np.reshape(agent.observations[-2, :vision_size], obs_shape)
+            r = np.reshape(agent.reconstructions[-2], obs_shape)
+            p = np.reshape(agent.predictions[-3, :vision_size], obs_shape)
 
-            return self.viewer.render()
+            if self.view != 0:
+                self.viewer.transform.set_scale(1, 1)
+                if self.view == 1:
+                    network_vis = agent.visualizer.visualize_activations((500, 500))
+                else:
+                    network_vis = agent.visualizer.visualize_attention(self.view - 1, (500, 500))
+                self.draw_neural_map(network_vis, WINDOW_W*0.025, WINDOW_H*0.025, WINDOW_W*0.95, WINDOW_H*0.95, colour=(50, 50, 50))
+                self.draw_observation(o, WINDOW_W - 180, 40, 180, 20, colour=(50, 50, 50))
+                self.draw_observation(r, WINDOW_W - 180, 20, 180, 20, colour=(50, 50, 50))
+                self.draw_observation(p, WINDOW_W - 180, 0, 180, 20, colour=(50, 50, 50))
+
+                return self.viewer.render()
+        else:
+            o = np.reshape(agent.observation[:vision_size], obs_shape)
 
         for x in range(len(self.grid)):
             for y in range(len(self.grid[0])):
@@ -179,13 +182,12 @@ class FishTank(Environment, ABC):
             health.render(self.viewer)
 
         # Draw bot
-        self.character.render(self.viewer)
+        self.character.render(self.viewer, self.stereoscopic)
 
         self.draw_observation(o, WINDOW_W/scale - 180, WINDOW_H/scale - 20, 180, 20, colour=(50, 50, 50))
 
-
         info_str = f"Time: {self.time}"
-        if isinstance(agent, AgentController):
+        if isinstance(agent, (HRLController, HTMController)):
             self.draw_observation(r, WINDOW_W/scale - 180, WINDOW_H/scale - 40, 180, 20, colour=(50, 50, 50))
             self.draw_observation(p, WINDOW_W/scale - 180, WINDOW_H/scale - 60, 180, 20, colour=(50, 50, 50))
 
@@ -203,7 +205,7 @@ class FishTank(Environment, ABC):
             info_str += f"\nReconstr_loss: {agent.reconstruction_loss:.3f}"
             info_str += f"\nPred_loss: {agent.prediction_loss:.3f}"
             info_str += f"\nReward: {agent.rewards[-1]:.3f}"
-            info_str += f"\nQ_value: {agent.q_values[-1]:.3f}"
+            #info_str += f"\nQ_value: {agent.q_values[-1]:.3f}"
             info_str += f"\nActions: [{agent.actions[-1][0]:.3f}, {agent.actions[-1][1]:.3f}]"
 
         label = pyglet.text.Label(info_str, font_size=10,
@@ -267,7 +269,7 @@ class FishTank(Environment, ABC):
 
     def get_observation(self, character):
         observation = np.zeros((character.fidelity, 3), dtype=np.float32)
-        ray_data = ray_march(character, self.grid, self.healthItems)
+        ray_data = ray_march(character, self.grid, self.healthItems, self.stereoscopic)
 
         # Create masks for each object type
         wall_mask = ray_data[:, 0] == 1
@@ -275,9 +277,9 @@ class FishTank(Environment, ABC):
 
         # Update observation array based on object types
         observation[wall_mask, :3] = np.array(Wall.colour[:3]) / 255 * (
-                1 - ray_data[wall_mask, 1][:, np.newaxis] / self.x_size)
+                1 - ray_data[wall_mask, 1][:, np.newaxis] / 300)
         observation[health_mask, :3] = np.array(Health.colour[:3]) / 255 * (
-                1 - ray_data[health_mask, 1][:, np.newaxis] / self.x_size)
+                1 - ray_data[health_mask, 1][:, np.newaxis] / 300)
 
         noise = np.random.normal(0, 1, observation.shape)
         observation += noise * 0.005

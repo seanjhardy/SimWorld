@@ -12,7 +12,7 @@ from modules.networks.transformer import Transformer, _init_weights
 
 class QTransformer(Transformer):
 
-    def __init__(self, config, gamma=0.98):
+    def __init__(self, config, gamma=0.5):
         super().__init__(config)
         self.gamma = gamma
         self.to(config.device_type)

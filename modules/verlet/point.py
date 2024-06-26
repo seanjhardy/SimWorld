@@ -52,6 +52,18 @@ class Point:
         dy = self.y - other_point.y
         return math.sqrt(dx ** 2 + dy ** 2)
 
+    def angle_to(self, other_point):
+        return math.atan2(other_point.y - self.y, other_point.x - self.x)
+
+    def sub(self, other):
+        return Point(self.x - other.x, self.y - other.y)
+
+    def rotate(self, origin, diff):
+        xdiff = self.x - origin.x
+        ydiff = self.y - origin.y
+        self.x = origin.x + math.cos(diff) * xdiff - math.sin(diff) * ydiff
+        self.y = origin.y + math.sin(diff) * xdiff + math.cos(diff) * ydiff
+
     def render(self, viewer, colour):
         t = rendering.Transform(translation=(self.x, self.y))
         geom = viewer.draw_circle(radius=self.mass, filled=True, color=colour)

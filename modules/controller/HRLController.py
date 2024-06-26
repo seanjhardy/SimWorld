@@ -1,7 +1,4 @@
-import math
 import os
-import sys
-import time
 
 import numpy as np
 import torch
@@ -13,14 +10,13 @@ from modules.controller.controller import Controller
 from contextlib import nullcontext
 
 from modules.io.replayBuffer import ReplayBuffer
-from modules.networks.ACBlock import ACBlock
 from modules.networks.Qtransformer import QTransformer
-from modules.networks.activationVisualiser import ActivationVisualizer
-from modules.networks.cvae import CVAE
-from modules.networks.HRLblock import HRLBlock
-from modules.networks.predictiveCodingNetwork import PredictiveCodingNetwork
-from modules.networks.transformer import TransformerConfig
-from torch import autograd
+from modules.io.activationVisualiser import ActivationVisualizer
+from modules.networks.policy.QActor import QActor
+from modules.networks.vision.GLOM import Glom, GlomAE, GlomAEConfig
+from modules.networks.vision.cvae import CVAE
+from modules.networks.transformer import TransformerConfig, cosine_embedding
+from modules.networks.vision.scae.SCAE import SCAEConfig
 
 seed = 1337
 device = 'cuda'  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
@@ -29,32 +25,34 @@ dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported
 # -----------------------------------------------------------------------------
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
+torch.set_float32_matmul_precision("medium")
 torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
 device_type = 'cuda' if 'cuda' in device else 'cpu'  # for later use in torch.autocast
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 fp16_precision = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+inference = torch.no_grad()
 
 
 # -----------------------------------------------------------------------------
 
-class AgentController(Controller):
+class HRLController(Controller):
     def model_name(self):
-        return f"cvae-wm-ac-v3"
+        return f"cvae-wm-ac-v5"
 
     def __init__(self, env, config=None):
         super().__init__()
         # Network size
         self.output_size = flatdim(env.action_space)
-        self.observation_size = flatdim(env.observation_space)
+        self.observation_size = flatdim(env.observation_space) + 38
         self.env = env
         self.batch_size = 1
         self.context_size = 512
 
         # Latent state representation size
-        self.latent_vis_size = 128
+        self.latent_vis_size = 160
         self.vision_size = flatdim(env.observation_space["vision"])
-        self.dynamics_size = flatdim(env.observation_space["dynamics"])
+        self.dynamics_size = flatdim(env.observation_space["dynamics"]) + 38
         self.latent_size = self.latent_vis_size + self.dynamics_size
 
         # Memories and stored info for training
@@ -73,8 +71,8 @@ class AgentController(Controller):
         self.policy_loss = 0
 
         # Control variables for enabling training/predicting/saving weights
-        self.train_interval = -1
-        self.predicting = True
+        self.train_interval = 1
+        self.predicting = False
         self.dreaming = False
         self.save_interval = -1
 
@@ -83,29 +81,34 @@ class AgentController(Controller):
             input_size=self.latent_size + self.output_size,
             output_size=self.latent_size,
             context_size=self.context_size,
-            n_layer=6, n_head=6, n_embd=240,  # model params
+            n_layer=6, n_head=6, n_embd=300,  # model params
             dropout=0.0, attn_dropout=0.0, bias=True,
             weight_decay=0.0001, learning_rate=0.001,  # Optimizer settings
             betas=(0.9, 0.95), device_type=device_type
         )
 
-        self.model = DotMap(
-            visual_cortex=CVAE(self.latent_vis_size, device=device),
-            neocortex=QTransformer(config if config is not None else self.transformerConfig),
-            rl_block_1=ACBlock(self.latent_size, self.output_size, 400, actor_only=True),
+        self.visConfig = GlomAEConfig(
+            stereoscopic=env.stereoscopic,
+            img_size=(1, self.vision_size // 3),
+            patch_size=(1, 4), n_embed=120,
+            n_layers=3, n_levels=3, in_chans=3,
+            lr=0.01, wd=0.0, betas=(0.9, 0.95),
         )
 
-        self.visualizer = ActivationVisualizer(self.model.neocortex)
+        self.model = DotMap(
+            #visual_cortex=CVAE(self.latent_vis_size, image_shape=(self.vision_size/3, 1), device=device),
+            visual_cortex=GlomAE(self.visConfig),
+            neocortex=QTransformer(config if config is not None else self.transformerConfig),
+            #actor=QActor(240, self.output_size, 300),
+            #hrl=HRLBlock(self.latent_size, self.output_size, 400),
+        )
+
+        self.visualizer = ActivationVisualizer([self.model.visual_cortex, self.model.neocortex])
         self.visualizer.register_hooks()
 
         torch.cuda.synchronize()
 
         self.load_model()
-        self.model.rl_block_1 = ACBlock(self.latent_size, self.output_size, 400, actor_only=True)
-        """self.load_submodel("visual_cortex",
-                           "../../checkpoints/cvae-wm-ac-v3.pth",
-                           "visual_cortex",
-                           "visual_cortex_optimizer")"""
         self.reset()
 
     def step(self, observation: dict, reward: float):
@@ -126,6 +129,13 @@ class AgentController(Controller):
             self.predictions = np.roll(self.predictions, shift=-1, axis=0)
             self.q_values = np.roll(self.q_values, shift=-1, axis=0)
             self.reconstructions = np.roll(self.reconstructions, shift=-1, axis=0)
+
+        # Embed position using cosine embeddings
+        pos = observation["dynamics"]["position"]
+        observation["dynamics"]["position"] = np.concatenate([
+            cosine_embedding(self.env.x_size, 20, [pos[0]]),
+            cosine_embedding(self.env.y_size, 20, [pos[1]])
+        ])
         self.observations[-1] = flatten(self.env.observation_space, observation)
         self.rewards[-1] = reward
         # self.memories.add(self.latents[-2], self.q_values, self.actions, reward, self.latents[-1])
@@ -134,14 +144,14 @@ class AgentController(Controller):
         actions = self.env.random_policy()
         self.actions[-1] = actions
 
-        if time % self.env.reset_interval < self.context_size:
-            return self.actions[-1]
+        #if time % self.env.reset_interval < self.context_size:
+        #    return self.actions[-1]
 
         # Make predictions
         if self.predicting and not self.dreaming:
-            with fp16_precision:
+            with fp16_precision, inference:
                 self.predict()
-            self.train_policy()
+            #self.train_policy()
 
         if self.dreaming:
             self.dream()
@@ -150,10 +160,10 @@ class AgentController(Controller):
         if time % self.train_interval == 0 and self.train_interval != -1:
             # Only start training the world model when our
             # latent space is expressive enough to be useful
-            if self.reconstruction_loss > 0.001:
+            if self.reconstruction_loss > 0.001 or True:
                 self.visual_cortex(self.observations, "train")
 
-            if self.reconstruction_loss < 0.002:
+            if self.reconstruction_loss < 0.001 and False:
                 latents, reconstructions = self.visual_cortex(self.observations, "forward")
                 self.latents = np.concatenate([latents, self.observations[:, self.vision_size:]], axis=-1)
                 self.reconstructions[-1] = reconstructions[-1]
@@ -161,8 +171,8 @@ class AgentController(Controller):
                 latent_predictions = self.train_neocortex(self.latents, self.actions, self.rewards)
                 self.visual_cortex(latent_predictions[-1, :self.latent_vis_size], "decode")
 
-            # if self.prediction_loss < 0.05:
-            #    self.train_policy()
+            #if self.prediction_loss < 0.5:
+                #self.train_policy()
 
         # Save the model every save_interval iterations
         if self.save_interval != -1 and time % self.save_interval == 0:
@@ -180,9 +190,8 @@ class AgentController(Controller):
         # Predict actions to take
         latent = torch.tensor(self.latents[-1])\
             .pin_memory().to(torch.float32, non_blocking=True).to(device)
-        with nullcontext():
-            actions = self.model.rl_block_1.forward(latent)
-        self.actions[-1] = actions
+        #actions = self.model.actor.forward(latent)
+        #self.actions[-1] = actions
 
         # Neocortex predicts next latent state using action taken
         neocortex_input = np.concatenate([self.latents, self.actions], axis=-1)
@@ -208,29 +217,29 @@ class AgentController(Controller):
         self.visual_cortex(latent_prediction[-1, :self.latent_vis_size], "decode")
 
     def visual_cortex(self, data, mode="train"):  # Train, decode, encode
-        if mode != "decode":
-            x = data[..., :self.vision_size].reshape((-1, 3, 1, self.env.obs_pixels))
-        else:
+        if mode == "decode":
             x = data
+        else:
+            x = data[..., :self.vision_size].reshape((-1, 3, 1, self.env.obs_pixels))
         x = torch.from_numpy(x).pin_memory().to(torch.float32, non_blocking=True).to(device)
 
         if mode == "train":
-            latents, reconstructions, loss = self.model.visual_cortex.backward(x)
-            self.latents[:, :self.latent_vis_size] = latents
-            self.latents[:, self.latent_vis_size:] = data[:, self.vision_size:]
+            latents, reconstructions, loss = self.model.visual_cortex.backward(x[[-1]])
+            #self.latents[:, :self.latent_vis_size] = latents
+            #self.latents[:, self.latent_vis_size:] = data[:, self.vision_size:]
             self.reconstructions[-1] = reconstructions[-1]
             self.reconstruction_loss = loss
         elif mode == "forward":
-            with fp16_precision:
+            with fp16_precision, inference:
                 latents, reconstructions, _, _ = self.model.visual_cortex.forward(x)
             return latents.cpu().detach().numpy(), \
                    reconstructions.cpu().detach().numpy().reshape(x.size(0), -1)
         elif mode == "encode":
-            with fp16_precision:
+            with fp16_precision, inference:
                 return self.model.visual_cortex.encode(x)
         elif mode == "decode":
             x = x.unsqueeze(0)
-            with fp16_precision:
+            with fp16_precision, inference:
                 reconstruction = self.model.visual_cortex.decode(x)
             self.predictions[-1, :self.vision_size] = reconstruction
         return None
@@ -310,7 +319,8 @@ class AgentController(Controller):
                 try:
                     model_obj.model.load_state_dict(load_dict[f"{name}"])
                     model_obj.optimizer.load_state_dict(load_dict[f"{name}_optimizer"])
-                except:
+                except Exception as e:
+                    print(e)
                     print("Failed to load:", name)
 
     def load_submodel(self, name, path, model_name, optimiser_name):

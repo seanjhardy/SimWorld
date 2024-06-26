@@ -1,5 +1,5 @@
 from environments.fishTank.fishTank import FishTank
-from environments.fishTank.character import Character
+from environments.fishTank.fish import Character
 from modules.controller.saveController import SaveController
 
 from modules.simulation.simulation import Simulation

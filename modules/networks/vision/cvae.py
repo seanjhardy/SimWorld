@@ -6,8 +6,12 @@ from torch.nn import functional as F
 
 # Define the autoencoder architecture
 class CVAE(nn.Module):
-    def __init__(self, latent_dim, device="cuda"):
+    def __init__(self, latent_dim, image_shape=(80, 1), device="cuda"):
         super().__init__()
+
+        flattened_size = int(16 * image_shape[1] * (image_shape[0] - 4))
+
+        psuedo_latent = int(latent_dim * 2)
         self.model = nn.ModuleDict(dict(
             encoder=nn.Sequential(
                 nn.Conv2d(3, 8, kernel_size=(1, 3), stride=1, padding=(0, 1)),
@@ -15,13 +19,13 @@ class CVAE(nn.Module):
                 nn.Conv2d(8, 16, kernel_size=(1, 5), stride=1, padding=0),
                 nn.ReLU(),
                 nn.Flatten(),
-                nn.Linear(1216, 512),
+                nn.Linear(flattened_size, psuedo_latent),
             ),
-            fc_mu=nn.Linear(512, latent_dim),
-            fc_log_var=nn.Linear(512, latent_dim),
+            fc_mu=nn.Linear(psuedo_latent, latent_dim),
+            fc_log_var=nn.Linear(psuedo_latent, latent_dim),
             decoder=nn.Sequential(
-                nn.Linear(latent_dim, 1216),
-                nn.Unflatten(1, (16, 1, 76)),
+                nn.Linear(latent_dim, flattened_size),
+                nn.Unflatten(1, (16, 1, -1)),
                 nn.ConvTranspose2d(16, 8, kernel_size=(1, 5),
                                    stride=1, padding=0, output_padding=0),
                 nn.ReLU(),
@@ -83,7 +87,7 @@ class CVAE(nn.Module):
         temporal_consistency_loss = 0.05 * torch.mean(torch.abs(reconstruction[1:] - reconstruction[:-1]))
         loss = reconstruction_loss_l2 + temporal_consistency_loss # + kl_loss
 
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         self.optimizer.step()
         return latent.cpu().detach().numpy(), \
