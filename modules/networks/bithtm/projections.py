@@ -55,8 +55,6 @@ class SparseProjection:
         self.invalid_input_edge = 0
         self.invalid_output_edge = self.input_dim
 
-        # TODO: optimize by separately tracking completely empty space of edges per input/output. -> use for adding edges and projection. (max cut-off)
-
         self.input_edge = DynamicArray2D(np.int32, size=(self.input_dim + 1, 0), growth_exponential=(False, edge_growth_exponential), on_grow=self.on_input_edge_grow)
         
         self.output_edges = DynamicArray2D(np.int32, size=(self.output_dim, 1), growth_exponential=(output_growth_exponential, False))
