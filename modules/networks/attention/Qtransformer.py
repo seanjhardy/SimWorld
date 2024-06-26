@@ -1,13 +1,8 @@
-import math
-import inspect
-import os
-from dataclasses import dataclass
-
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from modules.networks.transformer import Transformer, _init_weights
+from modules.networks.attention.transformer import Transformer, init_weights
 
 
 class QTransformer(Transformer):
@@ -17,9 +12,9 @@ class QTransformer(Transformer):
         self.gamma = gamma
         self.to(config.device_type)
         self.model.add_module("q_head",
-                              nn.Linear(config.n_embd, 1, bias=config.bias))
+                              nn.Linear(config.n_embed, 1, bias=config.bias))
         self.to(config.device_type)
-        self.apply(_init_weights)
+        self.apply(init_weights)
         self.configure_optimizers(config)
 
     def forward(self, idx, targets=None, rewards=None):

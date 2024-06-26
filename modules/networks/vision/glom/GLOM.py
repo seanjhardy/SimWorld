@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field
 from typing import Union
 
@@ -5,9 +6,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pytorch_lightning as pl
 from torch.optim import Adam
-from torchmetrics.functional import accuracy
+
+from modules.networks.attention.crossAttention import CrossAttention
+from modules.networks.classic.block import Block
 
 
 def patches2image_batch(x, output_size):
@@ -33,6 +35,7 @@ def attention(x):
 class PatchEmbed(nn.Module):
     """ 2D Image to Patch Embedding
     """
+
     def __init__(self, img_size=224, patch_size=(1, 16), in_chans=3, embed_dim=768, norm_layer=None, flatten=True):
         super().__init__()
         img_size = (img_size, img_size) if isinstance(img_size, int) else img_size
@@ -55,73 +58,6 @@ class PatchEmbed(nn.Module):
         return x
 
 
-class Mlp(nn.Module):
-    """ MLP as used in Vision Transformer, MLP-Mixer and related networks
-    """
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
-        super().__init__()
-        out_features = out_features or in_features
-        hidden_features = hidden_features or in_features
-        drop_probs = (drop, drop) if isinstance(drop, float) else drop
-
-        self.fc1 = nn.Linear(in_features, hidden_features)
-        self.act = act_layer()
-        self.drop1 = nn.Dropout(drop_probs[0])
-        self.fc2 = nn.Linear(hidden_features, out_features)
-        self.drop2 = nn.Dropout(drop_probs[1])
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop1(x)
-        x = self.fc2(x)
-        x = self.drop2(x)
-        return x
-
-
-class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
-        super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, x):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
-
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-class Block(nn.Module):
-
-    def __init__(self, dim, num_heads=1, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm):
-        super().__init__()
-        #self.norm1 = norm_layer(dim)
-        #self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
-        # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
-        self.norm2 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-
-    def forward(self, x):
-        #x = x + self.drop_path(self.attn(self.norm1(x)))
-        x = x + self.mlp(self.norm2(x))
-        return x
-
 class GlomLayer(nn.Module):
     def __init__(self, n_levels, level_dim, **kwargs):
         super().__init__()
@@ -141,35 +77,40 @@ class GlomLayer(nn.Module):
         z = []
         for l in range(NL):
             x_lev_cur = x[:, :, l]
-            x_lev_prev = x[:, :, l - 1] if l > 0 else torch.zeros_like(x_lev_cur) # [B, N, DL]
-            x_lev_next = x[:, :, l + 1] if l < (NL - 1) else torch.zeros_like(x_lev_cur) # [B, N, DL]
+            x_lev_prev = x[:, :, l - 1] if l > 0 else torch.zeros_like(x_lev_cur)  # [B, N, DL]
+            x_lev_next = x[:, :, l + 1] if l < (NL - 1) else torch.zeros_like(x_lev_cur)  # [B, N, DL]
 
-            z_lev_prev = self.bottom_up_net(x_lev_prev) # [B, N, DL]
-            z_lev_next = self.top_down_net(x_lev_next) + pos_lev_emb[l].unsqueeze(0).unsqueeze(0).repeat(B, N, 1) # [B, N, DL]
-            z_lev_cur = self.current_net(x_lev_cur) + z_lev_prev + z_lev_next # [B, N, DL]
+            z_lev_prev = self.bottom_up_net(x_lev_prev)  # [B, N, DL]
+            z_lev_next = self.top_down_net(x_lev_next) + \
+                         pos_lev_emb[l].unsqueeze(0).unsqueeze(0).repeat(B, N, 1)  # [B, N, DL]
+            z_lev_cur = self.current_net(x_lev_cur) + z_lev_prev + z_lev_next  # [B, N, DL]
             z += [self.norm(z_lev_cur)]
-        z = torch.stack(z, 2) # [B, N, NL, DL]
+        z = torch.stack(z, 2)  # [B, N, NL, DL]
         return z
+
 
 class Glom(nn.Module):
     """
     Glom Backbone.
     """
+
     def __init__(self, img_size=224, patch_size=16, in_chans=3, n_layers=3, n_levels=5, n_embed=1280,
-                 use_pos_emb=False, mlp_ratio=4):
+                 use_pos_emb=True, mlp_ratio=4, device="cuda"):
         super().__init__()
         assert n_embed % n_levels == 0, 'Features dimension must be divisible by number of levels!'
         self.n_levels = n_levels
         self.n_embed = n_embed
+        self.device = device
         self.use_pos_emb = use_pos_emb
         self.level_dim = self.n_embed // self.n_levels
-        self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=n_embed)
+        self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=in_chans,
+                                      embed_dim=self.n_embed)
         self.pos_lev_emb = nn.Parameter(torch.randn(n_levels, self.level_dim))
         self.layers = nn.ModuleList([
             GlomLayer(n_levels, self.level_dim, mlp_ratio=mlp_ratio) for _ in range(n_layers)
         ])
         if self.use_pos_emb:
-            self.clf_token = nn.Parameter(torch.randn(1, self.n_embed))
+            self.pos_emb = nn.Embedding(self.patch_embed.num_patches, self.n_embed)
 
     def forward(self, x):
         """
@@ -182,11 +123,12 @@ class Glom(nn.Module):
         x = self.patch_embed(x)  # [B, N, D]
         B, N, D = x.shape
         if self.use_pos_emb:
-            x = torch.cat([self.clf_token.unsqueeze(0).repeat(B, 1, 1), x], 1)  # [B, N + 1, D]
-        x = x.reshape(B, -1, self.n_levels, self.level_dim)  # [B, N( + 1), NL, DL]
+            pos = torch.arange(0, N, dtype=torch.int32, device=self.device)
+            x += self.pos_emb(pos)
+        x = x.reshape(B, -1, self.n_levels, self.level_dim)  # [B, N, NL, DL]
         for layer in self.layers:
             x = layer(x, self.pos_lev_emb)
-        return x  # [B, N( + 1), NL, DL]
+        return x  # [B, N, NL, DL]
 
 
 @dataclass
@@ -201,21 +143,48 @@ class GlomAEConfig:
     lr: float = 0.01
     wd: float = 0.0001
     betas: tuple[float, float] = (0.9, 0.95)
+    bias: bool = False
 
+
+class StereoAE(nn.Module):
+    def __init__(self, n_embed):
+        super().__init__()
+        self.models = nn.ModuleDict(dict(
+            cross_attention=CrossAttention(n_embed, n_head=3),
+            left_decoder=nn.Linear(n_embed, n_embed),
+            right_decoder=nn.Linear(n_embed, n_embed),
+        ))
+
+    def forward(self, left, right):
+        x = self.models.cross_attention(left, right)
+        left_rec = self.models.left_decoder(x)
+        right_rec = self.models.right_decoder(x)
+        return x, left_rec, right_rec
+
+    def backward(self, left, right):
+        x, left_rec, right_rec = self(left, right)
+
+        loss = F.mse_loss(left_rec, left) + F.mse_loss(right_rec, right)
+        return x, loss
 
 # Glom autoencoder
 class GlomAE(nn.Module):
-    def __init__(self, config:GlomAEConfig, device="cuda"):
+    def __init__(self, config: GlomAEConfig, device="cuda"):
         super().__init__()
         self.config = config
+        self.device = device
         self.model = nn.ModuleDict(dict(
             glom=Glom(img_size=config.img_size,
-                          patch_size=config.patch_size,
-                          in_chans=config.in_chans,
-                          n_layers=config.n_layers,
-                          n_levels=config.n_levels, n_embed=config.n_embed, use_pos_emb=False),
+                      patch_size=config.patch_size,
+                      in_chans=config.in_chans,
+                      n_layers=config.n_layers,
+                      n_levels=config.n_levels, n_embed=config.n_embed,
+                      use_pos_emb=True, device=device),
             rec_head=nn.Linear(config.n_embed, config.in_chans * (np.prod(config.patch_size)))
         ))
+        if config.stereoscopic:
+            self.model.add_module("stereo",
+                                  StereoAE(n_embed=config.n_embed))
         self.optimizer = Adam(self.model.parameters(),
                               lr=config.lr,
                               weight_decay=config.wd,
@@ -243,10 +212,15 @@ class GlomAE(nn.Module):
 
     def backward(self, x):
         if self.config.stereoscopic:
-            latent, rec = self(x)
+            left, right = torch.split(x, int(x.size(3) / 2), dim=3)
+            left_latent, left_rec = self(left)
+            right_latent, right_rec = self(left)
 
-            loss = F.mse_loss(rec, x)
+            latent, combined_loss = self.model.stereo.backward(left.detach(), right.detach())
+            left_loss = F.mse_loss(left_rec, left)
+            right_loss = F.mse_loss(right_rec, right)
 
+            loss = left_loss + right_loss + combined_loss
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             self.optimizer.step()
@@ -262,4 +236,3 @@ class GlomAE(nn.Module):
         return latent, \
                rec.detach().cpu().numpy().reshape(x.shape[0], -1), \
                loss
-

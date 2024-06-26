@@ -10,13 +10,10 @@ from modules.controller.controller import Controller
 from contextlib import nullcontext
 
 from modules.io.replayBuffer import ReplayBuffer
-from modules.networks.Qtransformer import QTransformer
+from modules.networks.attention.Qtransformer import QTransformer
 from modules.io.activationVisualiser import ActivationVisualizer
-from modules.networks.policy.QActor import QActor
-from modules.networks.vision.GLOM import Glom, GlomAE, GlomAEConfig
-from modules.networks.vision.cvae import CVAE
-from modules.networks.transformer import TransformerConfig, cosine_embedding
-from modules.networks.vision.scae.SCAE import SCAEConfig
+from modules.networks.vision.glom.GLOM import GlomAE, GlomAEConfig
+from modules.networks.attention.transformer import TransformerConfig, cosine_embedding
 
 seed = 1337
 device = 'cuda'  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
@@ -81,7 +78,7 @@ class HRLController(Controller):
             input_size=self.latent_size + self.output_size,
             output_size=self.latent_size,
             context_size=self.context_size,
-            n_layer=6, n_head=6, n_embd=300,  # model params
+            n_layer=6, n_head=6, n_embed=300,  # model params
             dropout=0.0, attn_dropout=0.0, bias=True,
             weight_decay=0.0001, learning_rate=0.001,  # Optimizer settings
             betas=(0.9, 0.95), device_type=device_type
@@ -91,7 +88,7 @@ class HRLController(Controller):
             stereoscopic=env.stereoscopic,
             img_size=(1, self.vision_size // 3),
             patch_size=(1, 4), n_embed=120,
-            n_layers=3, n_levels=3, in_chans=3,
+            n_layers=2, n_levels=2, in_chans=3,
             lr=0.01, wd=0.0, betas=(0.9, 0.95),
         )
 

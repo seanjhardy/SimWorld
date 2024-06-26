@@ -11,7 +11,7 @@ from environments.fishTank.fishTank import FishTank
 from modules.controller.HRLController import HRLController, device_type
 from contextlib import nullcontext
 
-from modules.networks.transformer import TransformerConfig
+from modules.networks.attention.transformer import TransformerConfig
 
 
 def train(config, learning_rate):
