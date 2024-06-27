@@ -167,6 +167,7 @@ class StereoAE(nn.Module):
         loss = F.mse_loss(left_rec, left) + F.mse_loss(right_rec, right)
         return x, loss
 
+
 # Glom autoencoder
 class GlomAE(nn.Module):
     def __init__(self, config: GlomAEConfig, device="cuda"):

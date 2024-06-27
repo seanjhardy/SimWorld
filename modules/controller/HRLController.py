@@ -86,7 +86,7 @@ class HRLController(Controller):
 
         self.visConfig = GlomAEConfig(
             stereoscopic=env.stereoscopic,
-            img_size=(1, self.vision_size // 3),
+            img_size=(1, self.vision_size // 6),
             patch_size=(1, 4), n_embed=120,
             n_layers=2, n_levels=2, in_chans=3,
             lr=0.01, wd=0.0, betas=(0.9, 0.95),
