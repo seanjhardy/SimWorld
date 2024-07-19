@@ -9,9 +9,10 @@ from modules.verlet.point import Point
 from modules.verlet.utils import find_perpendicular_points
 
 
-class Character:
+class Fish:
     maxAng = math.radians(5)
     maxAccel = 5
+    colour = (255, 0, 0)
 
     def __init__(self, x, y, obs_pixels):
         self.dir_change = 0
@@ -31,24 +32,27 @@ class Character:
         self.body = [Point(x, y, 4), Point(x, y, 5), Point(x, y, 2), Point(x, y, 0.6)]
         self.collision_force = np.zeros(len(self.body))
 
-    def reset(self, env):
-        x, y = env.x_size / 2, env.y_size / 2
+    def set_position(self, x, y):
         for i in range(len(self.body)):
             self.body[i].x = x - 15 * i
             self.body[i].y = y
             self.body[i].prev_x = x - 15 * i
             self.body[i].prev_y = y
 
+    def reset(self, env):
+        x, y = env.x_size / 2, env.y_size / 2
+        self.set_position(x, y)
         self.attacking = False
         self.accel = 0
         self.hp = 1000
 
+    # Generate actions from a random policy
     def random_policy(self):
         reset = self.target_speed == 0 and self.target_dir == 0 and self.dir_change_avg == 0
 
         dir_change = angle_diff(self.dir, self.target_dir)
-        dir_change = min(max(-Character.maxAng, dir_change * 0.05), Character.maxAng)
-        dir_change_input = dir_change / Character.maxAng
+        dir_change = min(max(-Fish.maxAng, dir_change * 0.05), Fish.maxAng)
+        dir_change_input = dir_change / Fish.maxAng
         actions = [self.target_speed, dir_change_input]
         speed, dir = self.body[0].get_velocity()
         if random.random() < 0.2 - clamp(0, speed / 5, 1) * 0.2 or reset:
@@ -59,6 +63,7 @@ class Character:
             self.target_dir = self.dir + math.pi
         return actions
 
+    # Simulate the character and perform actions in the environment
     def step(self, env, action):
         if action is not None:
             self.accel = action[0] * (1 if action[0] >= 0 else 0.2) * self.maxAccel
@@ -93,28 +98,30 @@ class Character:
             self.collision_force[i] = constrain_position(self.body[i], 0, 0, env.x_size, env.y_size)
             self.body[i].update()
 
-    def render(self, viewer, stereoscopic):
+    # Render the character in the environment
+    def render(self, viewer, stereoscopic, NPC=False):
         # draw view cone
-        half_fidelity = self.fidelity * 0.5
-        for i in range(self.fidelity):
-            start_x = self.body[0].x
-            start_y = self.body[0].y
-            if stereoscopic:
-                if i % 2 == 0:  # Odd index
-                    index = (self.fidelity + 1) // 2 + (i - 1) // 2
-                else:  # Even index
-                    index = i // 2
-                sign = 1 if i % 2 == 0 else -1
-                start_x += math.cos(self.dir + sign * (math.pi / 2)) * 5
-                start_y += math.sin(self.dir + sign * (math.pi / 2)) * 5
-            else:
-                index = i
-            ang = math.radians((i - half_fidelity) / self.fidelity * self.fov)
-            dist = self.rayDist[index]
-            end_x = start_x + math.cos(self.dir + ang) * dist
-            end_y = start_y + math.sin(self.dir + ang) * dist
-            ray = viewer.draw_line((start_x, start_y), (end_x, end_y))
-            ray.set_color(255, 0.0, 0.0, 0.2)
+        if not NPC:
+            half_fidelity = self.fidelity * 0.5
+            for i in range(self.fidelity):
+                start_x = self.body[0].x
+                start_y = self.body[0].y
+                if stereoscopic:
+                    if i % 2 == 0:  # Odd index
+                        index = (self.fidelity + 1) // 2 + (i - 1) // 2
+                    else:  # Even index
+                        index = i // 2
+                    sign = 1 if i % 2 == 0 else -1
+                    start_x += math.cos(self.dir + sign * (math.pi / 2)) * 5
+                    start_y += math.sin(self.dir + sign * (math.pi / 2)) * 5
+                else:
+                    index = i
+                ang = math.radians((i - half_fidelity) / self.fidelity * self.fov)
+                dist = self.rayDist[index]
+                end_x = start_x + math.cos(self.dir + ang) * dist
+                end_y = start_y + math.sin(self.dir + ang) * dist
+                ray = viewer.draw_line((start_x, start_y), (end_x, end_y))
+                ray.set_color(255, 0.0, 0.0, 0.2)
 
         # draw tail
         fin_colour = interpolate(self.get_colour(), (255, 255, 255), 0.3)
@@ -145,6 +152,7 @@ class Character:
                                self.body[2].y * 0.5 + self.body[1].y * 0.5,
                                angle, self.body[2].mass * 1.2, fin_colour, skew)
 
+        # Construct body polygon from body points
         for i in range(len(self.body)):
             tail = self.body[i]
             tail.render(viewer, self.get_colour())
@@ -157,6 +165,7 @@ class Character:
             viewer.draw_polygon(poly1, filled=True, color=self.get_colour())
 
 
+        # Draw dorsal fins
         dorsal_fin = [[self.body[0].x * 0.5 + self.body[1].x * 0.5,
                        self.body[0].y * 0.5 + self.body[1].y * 0.5],
                       [self.body[1].x,

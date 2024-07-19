@@ -106,8 +106,8 @@ class Simulation:
             view = int(self.get_argument(command, 1))
         except Exception as e:
             view = 1 - min(self.env.view, 1)
-            if self.agent.visualizer:
-                self.agent.visualizer.active = view != 0
+        if self.agent.visualizer is not None:
+            self.agent.visualizer.active = view != 0
         self.env.view = view
         print(f"Viewmode: {self.env.view}")
         return

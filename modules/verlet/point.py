@@ -29,14 +29,14 @@ class Point:
         acceleration_y = self.force_y / self.mass
 
         speed, dir = self.get_velocity()
-        frictionX = math.cos(dir + math.pi) * speed * 0.1
-        frictionY = math.sin(dir + math.pi) * speed * 0.1
+        friction_x = math.cos(dir + math.pi) * speed * 0.1
+        friction_y = math.sin(dir + math.pi) * speed * 0.1
 
         # Verlet integration
         new_x = 2 * self.x - self.prev_x \
-                + (acceleration_x + frictionX) * dt ** 2
+                + (acceleration_x + friction_x) * dt ** 2
         new_y = 2 * self.y - self.prev_y \
-                + (acceleration_y + frictionY) * dt ** 2
+                + (acceleration_y + friction_y) * dt ** 2
 
         self.prev_x = self.x
         self.prev_y = self.y

@@ -30,14 +30,18 @@ class ActivationVisualizer:
                 if isinstance(output, SpatialPooler.State):
                     self.activations[name] = output.get_bits()
                     return
+
                 if "identity" in name:
                     self.activations[name] = output
                     return
 
                 if len(output.shape) == 4:
-                    output = np.sum(output[0], axis=0)
+                    if "neocortex" in name:
+                        output = np.sum(output[-1], axis=0)
+                    else:
+                        output = output[-1].flatten()
                 elif len(output.shape) == 3:
-                    output = output[0][-1]
+                    output = output[-1].flatten()
                 else:
                     output = output[-1]
 
@@ -57,7 +61,8 @@ class ActivationVisualizer:
 
         for model in self.models:
             for name, layer in model.named_modules():
-                if not isinstance(layer, (nn.Linear, nn.Dropout, nn.Identity, SpatialPooler)):
+                if not isinstance(layer, (nn.Linear, nn.Dropout,
+                                          nn.Identity, SpatialPooler)):
                     continue
                 if isinstance(layer, nn.Dropout) and "attn_dropout" not in name:
                     continue

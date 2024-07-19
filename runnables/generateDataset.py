@@ -1,5 +1,5 @@
 from environments.fishTank.fishTank import FishTank
-from environments.fishTank.fish import Character
+from environments.fishTank.fish import Fish
 from modules.controller.saveController import SaveController
 
 from modules.simulation.simulation import Simulation
@@ -10,7 +10,7 @@ def generateDataset():
     env.render()
     simulation = Simulation(env)
 
-    ai = Character(300, 300)
+    ai = Fish(300, 300)
     controller = SaveController(env.inputType.get_size())
     ai.add_controller(controller)
     simulation.env.add_character(ai)

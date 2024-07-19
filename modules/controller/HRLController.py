@@ -1,3 +1,4 @@
+import math
 import os
 
 import numpy as np
@@ -12,8 +13,10 @@ from contextlib import nullcontext
 from modules.io.replayBuffer import ReplayBuffer
 from modules.networks.attention.Qtransformer import QTransformer
 from modules.io.activationVisualiser import ActivationVisualizer
+from modules.networks.attention.selfAttention import SelfAttention
 from modules.networks.vision.glom.GLOM import GlomAE, GlomAEConfig
 from modules.networks.attention.transformer import TransformerConfig, cosine_embedding
+from modules.networks.vision.glom.utils import random_blackout
 
 seed = 1337
 device = 'cuda'  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
@@ -26,8 +29,8 @@ torch.set_float32_matmul_precision("medium")
 torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
 device_type = 'cuda' if 'cuda' in device else 'cpu'  # for later use in torch.autocast
-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
-fp16_precision = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}
+fp16_precision = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype[dtype])
 inference = torch.no_grad()
 
 
@@ -44,11 +47,11 @@ class HRLController(Controller):
         self.observation_size = flatdim(env.observation_space) + 38
         self.env = env
         self.batch_size = 1
-        self.context_size = 512
+        self.context_size = 10
 
         # Latent state representation size
-        self.latent_vis_size = 160
         self.vision_size = flatdim(env.observation_space["vision"])
+        self.latent_vis_size = 36 * (self.vision_size // (4 * 3))
         self.dynamics_size = flatdim(env.observation_space["dynamics"]) + 38
         self.latent_size = self.latent_vis_size + self.dynamics_size
 
@@ -56,10 +59,10 @@ class HRLController(Controller):
         self.observations = None
         self.actions = None
         self.rewards = None
-        self.memories = None
 
         self.latents = None
         self.predictions = None
+        self.prediction = None
         self.reconstructions = None
         self.q_values = None
 
@@ -78,7 +81,7 @@ class HRLController(Controller):
             input_size=self.latent_size + self.output_size,
             output_size=self.latent_size,
             context_size=self.context_size,
-            n_layer=6, n_head=6, n_embed=300,  # model params
+            n_layer=6, n_head=6, n_embed=math.ceil((self.latent_size + 40) / 12) * 6,  # model params
             dropout=0.0, attn_dropout=0.0, bias=True,
             weight_decay=0.0001, learning_rate=0.001,  # Optimizer settings
             betas=(0.9, 0.95), device_type=device_type
@@ -86,17 +89,15 @@ class HRLController(Controller):
 
         self.visConfig = GlomAEConfig(
             stereoscopic=env.stereoscopic,
-            img_size=(1, self.vision_size // 6),
-            patch_size=(1, 4), n_embed=120,
-            n_layers=2, n_levels=2, in_chans=3,
-            lr=0.01, wd=0.0, betas=(0.9, 0.95),
+            img_size=(1, self.vision_size // (6 if self.env.stereoscopic else 3)),
+            patch_size=(1, 4), n_embed=72, n_head=6,
+            n_layers=3, in_chans=3,
+            lr=0.001, wd=0.001, betas=(0.9, 0.95),
         )
 
         self.model = DotMap(
-            #visual_cortex=CVAE(self.latent_vis_size, image_shape=(self.vision_size/3, 1), device=device),
             visual_cortex=GlomAE(self.visConfig),
             neocortex=QTransformer(config if config is not None else self.transformerConfig),
-            #actor=QActor(240, self.output_size, 300),
             #hrl=HRLBlock(self.latent_size, self.output_size, 400),
         )
 
@@ -105,7 +106,7 @@ class HRLController(Controller):
 
         torch.cuda.synchronize()
 
-        self.load_model()
+        #self.load_model()
         self.reset()
 
     def step(self, observation: dict, reward: float):
@@ -135,20 +136,17 @@ class HRLController(Controller):
         ])
         self.observations[-1] = flatten(self.env.observation_space, observation)
         self.rewards[-1] = reward
-        # self.memories.add(self.latents[-2], self.q_values, self.actions, reward, self.latents[-1])
 
         # Generate random action
         actions = self.env.random_policy()
         self.actions[-1] = actions
 
-        #if time % self.env.reset_interval < self.context_size:
-        #    return self.actions[-1]
+        if time % self.env.reset_interval < self.context_size:
+            return self.actions[-1]
 
         # Make predictions
         if self.predicting and not self.dreaming:
-            with fp16_precision, inference:
-                self.predict()
-            #self.train_policy()
+            self.predict()
 
         if self.dreaming:
             self.dream()
@@ -157,16 +155,14 @@ class HRLController(Controller):
         if time % self.train_interval == 0 and self.train_interval != -1:
             # Only start training the world model when our
             # latent space is expressive enough to be useful
-            if self.reconstruction_loss > 0.001 or True:
+            if self.reconstruction_loss > 0.00001 or True:
                 self.visual_cortex(self.observations, "train")
+            else:
+                self.visual_cortex(self.observations, "forward")
 
-            if self.reconstruction_loss < 0.001 and False:
-                latents, reconstructions = self.visual_cortex(self.observations, "forward")
-                self.latents = np.concatenate([latents, self.observations[:, self.vision_size:]], axis=-1)
-                self.reconstructions[-1] = reconstructions[-1]
-
-                latent_predictions = self.train_neocortex(self.latents, self.actions, self.rewards)
-                self.visual_cortex(latent_predictions[-1, :self.latent_vis_size], "decode")
+            #if self.reconstruction_loss < 0.0001:
+            #    latent_predictions = self.train_neocortex(self.latents, self.actions, self.rewards)
+            #    self.visual_cortex(latent_predictions[-1, :self.latent_vis_size], "decode")
 
             #if self.prediction_loss < 0.5:
                 #self.train_policy()
@@ -180,18 +176,16 @@ class HRLController(Controller):
 
     def predict(self):
         # Produce latent representation (and reconstruction)
-        latents, reconstructions = self.visual_cortex(self.observations, "forward")
-        self.latents = np.concatenate([latents, self.observations[:, self.vision_size:]], axis=-1)
-        self.reconstructions[-1] = reconstructions[-1]
+        self.visual_cortex(self.observations, "forward")
 
         # Predict actions to take
-        latent = torch.tensor(self.latents[-1])\
-            .pin_memory().to(torch.float32, non_blocking=True).to(device)
+        #latent = torch.tensor(self.latents[-1])\
+        #    .pin_memory().to(torch.float32, non_blocking=True).to(device)
         #actions = self.model.actor.forward(latent)
         #self.actions[-1] = actions
 
         # Neocortex predicts next latent state using action taken
-        neocortex_input = np.concatenate([self.latents, self.actions], axis=-1)
+        """neocortex_input = np.concatenate([self.latents, self.actions], axis=-1)
         neocortex_input = torch.from_numpy(neocortex_input[1:]).unsqueeze(0).to(device, non_blocking=True)
         latent_prediction, q_value, _ = self.model.neocortex(neocortex_input, None)
         self.q_values[-1] = q_value
@@ -199,7 +193,7 @@ class HRLController(Controller):
         # Decode latent prediction back into visual representation
         self.visual_cortex(latent_prediction[-1, :self.latent_vis_size], "decode")
         self.predictions[-1, self.vision_size:] = latent_prediction[-1, self.latent_vis_size:]
-        self.prediction_loss = np.mean(np.abs(self.predictions[-2] - self.observations[-1]))
+        self.prediction_loss = np.mean(np.abs(self.predictions[-2] - self.observations[-1]))"""
 
     def dream(self):
         # Neocortex predicts next latent state using action taken
@@ -215,28 +209,39 @@ class HRLController(Controller):
 
     def visual_cortex(self, data, mode="train"):  # Train, decode, encode
         if mode == "decode":
-            x = data
+            x = data.unsqueeze(0)
         else:
-            x = data[..., :self.vision_size].reshape((-1, 3, 1, self.env.obs_pixels))
+            x = data[..., :self.vision_size]
+            x = x.reshape((-1, self.env.obs_pixels, 3))  # B, W, C
+            x = x.transpose(0, 2, 1)  # B, C, W
+            x = x.reshape((-1, 3, 1, self.env.obs_pixels))  # B, C, H, W
         x = torch.from_numpy(x).pin_memory().to(torch.float32, non_blocking=True).to(device)
 
         if mode == "train":
-            latents, reconstructions, loss = self.model.visual_cortex.backward(x[[-1]])
-            #self.latents[:, :self.latent_vis_size] = latents
-            #self.latents[:, self.latent_vis_size:] = data[:, self.vision_size:]
+            with torch.enable_grad():#, torch.autograd.detect_anomaly()
+                latents, reconstructions, loss = self.model.visual_cortex.backward(x[[-1]])
+            #self.latents[-1] = np.concatenate([latents[-1].flatten(),
+            #                                   self.observations[-1, self.vision_size:]], axis=-1)
             self.reconstructions[-1] = reconstructions[-1]
             self.reconstruction_loss = loss
         elif mode == "forward":
-            with fp16_precision, inference:
-                latents, reconstructions, _, _ = self.model.visual_cortex.forward(x)
-            return latents.cpu().detach().numpy(), \
-                   reconstructions.cpu().detach().numpy().reshape(x.size(0), -1)
+            with inference, fp16_precision:
+                latents, reconstructions = self.model.visual_cortex.forward(x[[-1]], to_numpy=True)
+                # B, P, E
+                self.reconstructions[-1] = reconstructions[-1]
+                latents = latents[0].reshape(30, -1)
+                latents = (latents - np.mean(latents)) / (np.max(latents) - np.min(latents))
+                # P, 12
+                latents = np.repeat(latents, 4, axis=0)
+                latents = np.repeat(latents[:, :, np.newaxis], 3, axis=2)
+                self.prediction = latents
+                #self.latents[-1] = np.concatenate([latents[-1].flatten(),
+                #                                   self.observations[-1, self.vision_size:]], axis=-1)
         elif mode == "encode":
-            with fp16_precision, inference:
+            with inference, fp16_precision:
                 return self.model.visual_cortex.encode(x)
         elif mode == "decode":
-            x = x.unsqueeze(0)
-            with fp16_precision, inference:
+            with inference, fp16_precision:
                 reconstruction = self.model.visual_cortex.decode(x)
             self.predictions[-1, :self.vision_size] = reconstruction
         return None
@@ -260,7 +265,6 @@ class HRLController(Controller):
         return logits
 
     def train_policy(self):
-        # data = self.memories.sample(batch_size)
         # L1, Q1, R2, L2, Q2
         with torch.amp.autocast(device_type="cuda", dtype=torch.float32):
             data = (self.latents[:self.context_size],
@@ -278,7 +282,6 @@ class HRLController(Controller):
         self.observations = np.zeros((self.context_size + 1, self.observation_size), dtype=np.float16)
         self.actions = np.zeros((self.context_size + 1, self.output_size), dtype=np.float16)
         self.rewards = np.zeros(self.context_size, dtype=np.float16)
-        self.memories = ReplayBuffer(1024)
 
         self.latents = np.zeros((self.context_size + 1, self.latent_size), dtype=np.float16)
         self.q_values = np.zeros(self.context_size + 1, dtype=np.float16)
